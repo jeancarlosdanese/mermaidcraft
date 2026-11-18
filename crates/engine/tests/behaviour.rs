@@ -292,3 +292,32 @@ fn hatching_adds_lines_and_is_deterministic() {
     assert!(a.prims.len() > solid.prims.len() + 20);
     assert_eq!(a.to_svg(), b.to_svg());
 }
+
+#[test]
+fn hatching_cost_is_bounded_with_hostile_input() {
+    use look::*;
+    use scene::PrimShape;
+    // Many huge notes (the shape the review used to make the hatch blow up).
+    let tall = vec!["a"; 300].join("<br>");
+    let mut src = String::from("sequenceDiagram\n  participant A\n  participant B\n");
+    for _ in 0..30 {
+        src.push_str(&format!("  Note over A,B: {tall}\n"));
+    }
+    let opts = RenderOptions { fill: Fill::CrossHatch, stroke: Stroke::Cartoonist, ..RenderOptions::default() };
+    let started = std::time::Instant::now();
+    let (s, _) = render_source_with(&src, &opts).unwrap();
+    let hatch = s.prims.iter().filter(|p| p.fill_line).count();
+    assert!(hatch > 0 && hatch <= sketch::HATCH_BUDGET, "hatch lines: {hatch}");
+    let cmds: usize = s.prims.iter().map(|p| if let PrimShape::Path(c) = &p.shape { c.len() } else { 1 }).sum();
+    assert!(cmds < 200_000, "drawing commands: {cmds}");
+    assert!(started.elapsed().as_secs() < 20);
+}
+
+#[test]
+fn arrows_option_reaches_er_edges() {
+    use look::*;
+    let src = edit::template("er");
+    let graphite = render_source(src).unwrap().0.to_svg();
+    let source = render_source_with(src, &RenderOptions { arrows: Arrows::Source, ..RenderOptions::default() }).unwrap().0.to_svg();
+    assert_ne!(graphite, source);
+}

@@ -120,7 +120,8 @@ pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
         let (Some(ta), Some(tb)) = (tables.get(r.a), tables.get(r.b)) else { continue };
         let (ca, cb) = (center(r.a), center(r.b));
         let tag = Tag::Edge(ri);
-        let color = [90, 90, 110, 255];
+        let source = look::indexed(opts.colors, r.a).map_or(look::GRAPHITE, |c| c.1);
+        let color = look::edge_color(opts, [90, 90, 110, 255], source);
         let pts: Vec<P>;
         let mut label_at: Option<P> = layout.label_pos.get(ri).copied().flatten();
         let (da, db);

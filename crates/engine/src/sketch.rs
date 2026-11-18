@@ -141,6 +141,10 @@ pub fn roughen(scene: &mut Scene, amount: f32) {
     let k = if amount.is_finite() { amount.clamp(0.0, 3.0) } else { 1.0 };
     let old = std::mem::take(&mut scene.prims);
     for (i, p) in old.into_iter().enumerate() {
+        if p.fill_line {
+            scene.prims.push(p);
+            continue;
+        }
         let mut rng = Rng::new(i as u64 + 1);
         let tag = p.tag;
         let stroke_prim = |cmds: Vec<PathCmd>| -> Prim {
@@ -215,10 +219,13 @@ fn open_closed(pts: &[P], rng: &mut Rng, k: f32) -> Vec<PathCmd> {
     smooth(&v)
 }
 
-/// Distance between hatch lines.
+/// Distance between hatch lines (it grows in very large shapes, see `MAX_LINES_PER_PASS`).
 const HATCH_GAP: f32 = 7.0;
-/// Most hatch lines drawn in one shape, whatever its size.
-const MAX_HATCH_LINES: usize = 600;
+/// Most lines of one hatch direction in one shape: larger shapes get wider gaps instead, so
+/// the whole shape stays covered.
+const MAX_LINES_PER_PASS: f32 = 400.0;
+/// Most hatch lines in a whole scene; shapes beyond the budget keep their plain pale fill.
+pub const HATCH_BUDGET: usize = 20_000;
 
 /// Outline of a closed, filled shape as a polygon, if it has one.
 fn outline_of(shape: &PrimShape) -> Option<Vec<P>> {
@@ -242,9 +249,13 @@ fn hatch_lines(poly: &[P], angle: f32, gap: f32) -> Vec<(P, P)> {
     let back = |x: f32, y: f32| (x * cos - y * sin, x * sin + y * cos);
     let (y_min, y_max) = rot.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
     let mut out = Vec::new();
+    // Wider gaps in very large shapes keep the line count bounded and the whole shape covered.
+    let gap = gap.max((y_max - y_min) / MAX_LINES_PER_PASS);
     let mut y = y_min + gap / 2.0;
     let n = rot.len();
-    while y < y_max && out.len() < MAX_HATCH_LINES {
+    let mut rows = 0.0f32;
+    while y < y_max && rows <= MAX_LINES_PER_PASS + 1.0 {
+        rows += 1.0;
         let mut xs: Vec<f32> = Vec::new();
         for i in 0..n {
             let (Some(a), Some(b)) = (rot.get(i), rot.get((i + 1) % n)) else { continue };
@@ -268,6 +279,7 @@ fn hatch_lines(poly: &[P], angle: f32, gap: f32) -> Vec<(P, P)> {
 
 /// Fills coloured, outlined shapes (nodes, actors, entity headers) with hatch lines over a pale
 /// base, keeping the text on top readable. Group frames, edges and white boxes stay as they are.
+/// At most `HATCH_BUDGET` lines are drawn in the whole scene.
 pub fn hatch(scene: &mut Scene, fill: Fill, amount: f32) {
     let angles: &[f32] = match fill {
         Fill::Solid => return,
@@ -276,6 +288,7 @@ pub fn hatch(scene: &mut Scene, fill: Fill, amount: f32) {
     };
     let k = if amount.is_finite() { amount.clamp(0.0, 3.0) } else { 1.0 };
     let old = std::mem::take(&mut scene.prims);
+    let mut drawn = 0usize;
     for (i, p) in old.into_iter().enumerate() {
         let colour = p.fill.filter(|c| c[3] > 0 && luma(*c) < 247.0);
         let eligible = !matches!(p.tag, Tag::Cluster(_) | Tag::Edge(_));
@@ -295,9 +308,15 @@ pub fn hatch(scene: &mut Scene, fill: Fill, amount: f32) {
         let mut rng = Rng::new(i as u64 + 7919);
         for &angle in angles {
             for (a, b) in hatch_lines(&poly, angle, HATCH_GAP) {
+                if drawn >= HATCH_BUDGET {
+                    break;
+                }
+                drawn += 1;
                 let a = add(a, (rng.next() * 0.8 * k, rng.next() * 0.8 * k));
                 let b = add(b, (rng.next() * 0.8 * k, rng.next() * 0.8 * k));
-                scene.prims.push(Prim::new(PrimShape::Path(vec![PathCmd::Move(a.0, a.1), PathCmd::Line(b.0, b.1)])).stroke(line, 1.3).tag(tag));
+                let mut q = Prim::new(PrimShape::Path(vec![PathCmd::Move(a.0, a.1), PathCmd::Line(b.0, b.1)])).stroke(line, 1.3).tag(tag);
+                q.fill_line = true;
+                scene.prims.push(q);
             }
         }
     }

@@ -68,6 +68,9 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns -o "$APP/Contents/Resources/MermaidCraft.icns" "$ICONSET"
 cp "$ROOT/assets/fonts/OFL.txt" "$APP/Contents/Resources/OFL-fonts.txt"
+for lic in "$ROOT"/assets/fonts/OFL-*.txt; do
+  cp "$lic" "$APP/Contents/Resources/$(basename "$lic")"
+done
 
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@BUILD_SHA@/$BUILD_SHA/g" "$HERE/Info.plist.in" >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"

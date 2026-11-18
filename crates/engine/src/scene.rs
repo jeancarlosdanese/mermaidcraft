@@ -49,11 +49,13 @@ pub struct Prim {
     pub stroke_width: f32,
     pub dash: Option<(f32, f32)>,
     pub tag: Tag,
+    /// A hatch line inside a filled shape: already hand-drawn, so `roughen` leaves it alone.
+    pub fill_line: bool,
 }
 
 impl Prim {
     pub fn new(shape: PrimShape) -> Self {
-        Self { shape, fill: None, stroke: None, stroke_width: 1.0, dash: None, tag: Tag::None }
+        Self { shape, fill: None, stroke: None, stroke_width: 1.0, dash: None, tag: Tag::None, fill_line: false }
     }
     pub fn fill(mut self, c: Color) -> Self {
         self.fill = Some(c);

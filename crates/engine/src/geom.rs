@@ -115,8 +115,8 @@ pub fn dist_to_segment(p: P, a: P, b: P) -> f32 {
 }
 
 /// An arrow head or marker at `tip` pointing along `dir` (unit vector). Returns primitives.
-/// Shapes of an edge head. `open` draws the arrow as an open "V" (hand-drawn looks) instead of
-/// a filled triangle.
+/// Shapes of an edge head. `open` draws the arrow as an open "V" instead of a filled triangle;
+/// renderers ask for it in every colour mode except the classic Mermaid one.
 pub fn head_prims(kind: crate::model::Head, tip: P, dir: P, color: [u8; 4], width: f32, tag: crate::scene::Tag, open: bool) -> Vec<Prim> {
     use crate::model::Head;
     let perp = (-dir.1, dir.0);

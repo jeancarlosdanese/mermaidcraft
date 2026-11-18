@@ -154,7 +154,6 @@ fn setup_fonts(ctx: &egui::Context) {
     if let Some(fallback) = fonts.families.get(&egui::FontFamily::Proportional) {
         bold.extend(fallback.iter().filter(|n| n.as_str() != "lib-sans").cloned());
     }
-    fonts.families.insert(paint::bold_family(), bold.clone());
     // One family (and its bold) per diagram font, falling back to the interface fonts for
     // characters the hand-drawn faces lack.
     let fallback: Vec<String> = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();

@@ -25,23 +25,29 @@ Protótipo de referência: artifact "Protótipo MermaidCraft" (rough.js, só par
 - **Por forma:** decisão em amarelo, início e fim (pílula, círculo) em verde, banco de dados em roxo,
   sub-rotina em azul, entrada e saída (paralelogramo, trapézio) em verde-água, hexágono em laranja,
   o resto em cinza.
+- Em sequence e ER não há grupos nem formas: "por grupo" e "por forma" dão uma cor por participante
+  ou entidade.
 - `classDef`, `class` e `style` do texto continuam valendo por cima de qualquer modo.
+- "Setas" vale para flowchart, sequence e ER.
 - O visual "clean" antigo (`--look clean`) continua igual: traço limpo, Liberation Sans e cores
   clássicas.
 
 ## Onde aparece
 
 - **App:** menu Exibir › Aparência, com cada opção e "Restaurar padrão". A escolha fica nas
-  preferências do app.
+  preferências do app. Quem tinha desligado o visual antigo (`sketch=0` ou `colorful=0` no arquivo
+  de preferências) passa a ter traço limpo ou cores clássicas, em vez do padrão novo.
 - **CLI:** `render` aceita `--font`, `--colors`, `--fill`, `--stroke` e `--arrows`, além do `--look`.
 - **MCP:** a ferramenta `diagram_render` aceita os mesmos campos.
 
 ## Mudanças visuais junto com as opções
 
 - Cores mais claras (tons 0–1 da paleta Open Color) e bordas no tom forte.
-- Setas com ponta aberta em "V" e traço mais calmo que o contorno dos nós.
+- Setas com ponta aberta em "V" em todos os modos de cor, menos o clássico (que mantém a ponta
+  cheia), e traço mais calmo que o contorno dos nós.
 - Hachura feita no motor (sem dependência nova), com fundo claro por baixo para o texto continuar
-  legível.
+  legível. O custo é limitado: até 20 mil linhas por diagrama, espaçamento maior em formas muito
+  grandes, e as linhas não passam de novo pelo traço à mão.
 - Título do grupo no canto superior esquerdo, fora do caminho das setas que entram no grupo.
 
 ## Fontes
@@ -65,6 +71,13 @@ usam o regular nos títulos.
 3. A medida do texto usa a fonte escolhida: o rótulo não vaza da caixa em nenhuma fonte.
 4. `--look clean` gera o mesmo resultado de antes.
 5. `cargo test` e `cargo clippy -- -D warnings` limpos.
+
+## Revisão (18/11/2026)
+
+Primeira passada do revisor sobre `8ff3684`: um achado médio (custo da hachura sem limite com entrada
+hostil: 347 MB de SVG com 100 notas enormes) e seis baixos (ponta aberta × documento, `--arrows` sem
+efeito no ER, licenças fora do `.app`, código sem uso, preferências antigas ignoradas, duplicação).
+Todos corrigidos na mesma branch, com testes de regressão para a hachura e para as setas do ER.
 
 ## Verificação (18/11/2026)
 

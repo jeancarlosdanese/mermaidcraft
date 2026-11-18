@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::geom::*;
 use crate::layout::{LEdge, LItem, LayoutResult, Spacing, layered};
-use crate::look::{self, Arrows, ColorMode, Font};
+use crate::look::{self, ColorMode, Font};
 use crate::model::*;
 use crate::scene::*;
 use crate::text::{label_size, split_lines};
@@ -274,17 +274,12 @@ fn cluster_colors(mode: ColorMode, s: usize) -> (Color, Color, bool, Color) {
     let t = &DEFAULT_THEME;
     match mode {
         ColorMode::Classic => (t.cluster_fill, t.cluster_stroke, false, t.text),
-        ColorMode::PerNode => (tint(palette(s).0, 0.4), palette(s).1, true, t.text),
+        ColorMode::PerNode => (look::mix([255, 255, 255, 255], palette(s).0, 0.4), palette(s).1, true, t.text),
         ColorMode::Neutral | ColorMode::Group | ColorMode::Shape => {
             let h = if mode == ColorMode::Neutral { look::GRAY } else { look::hue_at(s) };
             (h.pale, look::mix(h.hatch, h.stroke, 0.4), true, h.stroke)
         }
     }
-}
-
-fn tint(c: Color, k: f32) -> Color {
-    let m = |v: u8| (f32::from(v) * k + 255.0 * (1.0 - k)).round().clamp(0.0, 255.0) as u8;
-    [m(c[0]), m(c[1]), m(c[2]), 255]
 }
 
 pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
@@ -557,12 +552,12 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         let (ca, wa, ha, oa) = center_of(a);
         let (cb, wb, hb, ob) = center_of(b);
         let tag = Tag::Edge(ei);
-        let ecol: Color = match (opts.colors, opts.arrows, a) {
-            (ColorMode::Classic, _, _) => t.line,
-            (_, Arrows::Graphite, _) => look::GRAPHITE,
-            (mode, Arrows::Source, Item::Node(n)) => node_base(fc, n, mode).map_or(t.line, |c| c.1),
-            (mode, Arrows::Source, Item::Sub(sg)) => cluster_colors(mode, sg).3,
+        let source = match a {
+            Item::Node(n) => node_base(fc, n, opts.colors).map_or(t.line, |c| c.1),
+            Item::Sub(sg) => cluster_colors(opts.colors, sg).3,
         };
+        let ecol = look::edge_color(opts, t.line, source);
+        // Open "V" heads in every look except the classic one.
         let open = opts.colorful();
         let width = match e.kind.style {
             LineStyle::Thick => 3.5,

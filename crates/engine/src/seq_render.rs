@@ -3,7 +3,7 @@
 use crate::geom::*;
 use crate::model::*;
 use crate::scene::*;
-use crate::look::{self, Arrows, ColorMode};
+use crate::look;
 use crate::text::{label_size, split_lines, text_width};
 
 const FONT: f32 = 15.0;
@@ -125,11 +125,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
                 let th = if text.is_empty() { 0.0 } else { label_size(text, MSG_FONT, false, font).1 };
                 let (xa, xb) = (x_of(*from), x_of(*to));
                 let sender = look::indexed(opts.colors, *from).map_or(t.line, |c| c.1);
-                let col = match (opts.colors, opts.arrows) {
-                    (ColorMode::Classic, _) => t.line,
-                    (_, Arrows::Graphite) => look::GRAPHITE,
-                    (_, Arrows::Source) => sender,
-                };
+                let col = look::edge_color(opts, t.line, sender);
                 let dash = |p: Prim| if arrow.dotted { p.dash(5.0, 4.0) } else { p };
                 counter += 1;
                 if from == to {

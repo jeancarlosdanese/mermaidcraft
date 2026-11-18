@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 
 use crate::look::Font;
 
-/// Embedded fonts (SIL Open Font License, see `assets/fonts/OFL.txt`).
+/// Embedded fonts (SIL Open Font License: `assets/fonts/OFL.txt` for Liberation and
+/// `assets/fonts/OFL-<family>.txt` for the hand-drawn faces).
 pub const SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-Regular.ttf");
 pub const SANS_BOLD: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-Bold.ttf");
 pub const SANS_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-Italic.ttf");

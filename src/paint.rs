@@ -26,10 +26,6 @@ fn col(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
 
-pub fn bold_family() -> FontFamily {
-    FontFamily::Name("bold".into())
-}
-
 /// The egui family of a diagram font (registered at start-up for every font of the look).
 pub fn diagram_family(font: Font, bold: bool) -> FontFamily {
     FontFamily::Name(format!("d-{}{}", font.id(), if bold { "-b" } else { "" }).into())

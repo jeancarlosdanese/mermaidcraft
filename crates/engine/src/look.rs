@@ -118,10 +118,6 @@ impl Font {
             Font::PatrickHand | Font::Architects => self.regular(),
         }
     }
-
-    pub fn has_bold(self) -> bool {
-        !matches!(self, Font::PatrickHand | Font::Architects)
-    }
 }
 
 impl Stroke {
@@ -189,6 +185,16 @@ pub fn indexed(mode: ColorMode, i: usize) -> Option<(Color, Color)> {
             let h = hue_at(i);
             Some((h.light, h.stroke))
         }
+    }
+}
+
+/// Colour of an edge: the classic line colour, graphite, or the colour of the node, participant
+/// or entity it leaves from.
+pub fn edge_color(opts: &crate::RenderOptions, classic: Color, source: Color) -> Color {
+    match (opts.colors, opts.arrows) {
+        (ColorMode::Classic, _) => classic,
+        (_, Arrows::Graphite) => GRAPHITE,
+        (_, Arrows::Source) => source,
     }
 }
 

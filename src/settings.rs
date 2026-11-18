@@ -43,6 +43,9 @@ impl Settings {
                     Some(("lang", "pt")) => s.lang = Lang::Pt,
                     Some(("lang", "en")) => s.lang = Lang::En,
                     Some(("dark", v)) => s.dark = v == "1",
+                    // Files from before the look options: keep a plain look for whoever chose it.
+                    Some(("sketch", "0")) => s.look.stroke = Stroke::Clean,
+                    Some(("colorful", "0")) => s.look.colors = ColorMode::Classic,
                     Some(("font", v)) => s.look.font = Font::from_id(v).unwrap_or(s.look.font),
                     Some(("colors", v)) => s.look.colors = ColorMode::from_id(v).unwrap_or(s.look.colors),
                     Some(("fill", v)) => s.look.fill = Fill::from_id(v).unwrap_or(s.look.fill),
