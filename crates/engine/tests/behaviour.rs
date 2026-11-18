@@ -227,3 +227,68 @@ fn looks_render() {
         }
     }
 }
+
+#[test]
+fn default_look_is_proposal_a() {
+    use look::*;
+    let o = RenderOptions::default();
+    assert_eq!((o.font, o.colors, o.fill, o.stroke, o.arrows), (Font::Shantell, ColorMode::Group, Fill::Solid, Stroke::Artist, Arrows::Graphite));
+    let (s, _) = render_source(edit::template("flowchart")).unwrap();
+    assert!(s.to_svg().contains("font-family=\"'Shantell Sans'"));
+    let (c, _) = render_source_with(edit::template("flowchart"), &RenderOptions::clean()).unwrap();
+    assert!(c.to_svg().contains("font-family=\"'Liberation Sans'"));
+}
+
+#[test]
+fn every_look_option_renders_and_labels_fit() {
+    use look::*;
+    let src = "flowchart TD\n  A[Uma etiqueta bem comprida] --> B{Decisão?}\n  subgraph G [Grupo]\n    C([Ação]) --> D[(Dados)]\n  end\n  B -->|sim| C\n";
+    for font in Font::ALL {
+        for fill in Fill::ALL {
+            let opts = RenderOptions { font: *font, fill: *fill, ..RenderOptions::default() };
+            let (s, _) = render_source_with(src, &opts).unwrap();
+            assert_eq!(s.font, *font);
+            let w = text::text_width("Uma etiqueta bem comprida", 15.0, false, *font);
+            assert!(s.node_boxes[0].w > w + 20.0, "{font:?}: box {} text {w}", s.node_boxes[0].w);
+            assert!(export::svg_to_png(&s.to_svg(), 1.0).is_ok());
+        }
+    }
+    for colors in ColorMode::ALL {
+        for stroke in Stroke::ALL {
+            for arrows in Arrows::ALL {
+                let opts = RenderOptions { colors: *colors, stroke: *stroke, arrows: *arrows, ..RenderOptions::default() };
+                assert!(render_source_with(src, &opts).is_ok());
+            }
+        }
+    }
+}
+
+#[test]
+fn colours_follow_group_or_shape() {
+    use look::*;
+    use scene::{PrimShape, Tag};
+    let src = "flowchart TD\n  A{Ok?} --> B\n  subgraph G [Grupo]\n    B[Passo]\n  end\n";
+    let fill_of = |opts: RenderOptions, node: usize| {
+        let (s, _) = render_source_with(src, &RenderOptions { stroke: Stroke::Clean, ..opts }).unwrap();
+        s.prims.iter().find(|p| p.tag == Tag::Node(node) && !matches!(p.shape, PrimShape::Text { .. }) && p.fill.is_some()).and_then(|p| p.fill).unwrap()
+    };
+    let group = RenderOptions::default();
+    assert_eq!(fill_of(group, 0), YELLOW.light, "a loose decision follows its shape");
+    assert_eq!(fill_of(group, 1), hue_at(0).light, "a node in a group takes the group colour");
+    let shape = RenderOptions { colors: ColorMode::Shape, ..group };
+    assert_eq!(fill_of(shape, 1), GRAY.light);
+    let neutral = RenderOptions { colors: ColorMode::Neutral, ..group };
+    assert_eq!(fill_of(neutral, 0), GRAY.light);
+}
+
+#[test]
+fn hatching_adds_lines_and_is_deterministic() {
+    use look::*;
+    let src = edit::template("flowchart");
+    let solid = render_source_with(src, &RenderOptions::default()).unwrap().0;
+    let opts = RenderOptions { fill: Fill::CrossHatch, ..RenderOptions::default() };
+    let a = render_source_with(src, &opts).unwrap().0;
+    let b = render_source_with(src, &opts).unwrap().0;
+    assert!(a.prims.len() > solid.prims.len() + 20);
+    assert_eq!(a.to_svg(), b.to_svg());
+}

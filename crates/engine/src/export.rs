@@ -11,7 +11,7 @@ fn fontdb() -> Arc<usvg::fontdb::Database> {
     static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
-        for data in [crate::text::SANS_REGULAR, crate::text::SANS_BOLD, crate::text::SANS_ITALIC, crate::text::SANS_BOLD_ITALIC, crate::text::MONO_REGULAR, crate::text::MONO_BOLD] {
+        for data in crate::text::ALL_FONT_DATA {
             db.load_font_data(data.to_vec());
         }
         db.set_sans_serif_family(crate::text::FONT_FAMILY);

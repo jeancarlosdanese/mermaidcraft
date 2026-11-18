@@ -3,6 +3,7 @@
 use crate::geom::*;
 use crate::model::*;
 use crate::scene::*;
+use crate::look::{self, Arrows, ColorMode};
 use crate::text::{label_size, split_lines, text_width};
 
 const FONT: f32 = 15.0;
@@ -37,11 +38,13 @@ fn lines_block(out: &mut Vec<Prim>, cx: f32, top: f32, text: &str, size: f32, co
 }
 
 pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
+    let font = opts.font;
+    let open = opts.colorful();
     let t = &DEFAULT_THEME;
     let n = seq.participants.len();
     let has_actor = seq.participants.iter().any(|p| p.actor);
     let head_h = if has_actor { ACTOR_H } else { BOX_H };
-    let box_w: Vec<f32> = seq.participants.iter().map(|p| (label_size(&p.label, FONT, false).0 + 32.0).max(100.0)).collect();
+    let box_w: Vec<f32> = seq.participants.iter().map(|p| (label_size(&p.label, FONT, false, font).0 + 32.0).max(100.0)).collect();
     // Column gaps.
     let mut gaps: Vec<f32> = (0..n.saturating_sub(1))
         .map(|i| {
@@ -54,7 +57,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
     for it in &seq.items {
         match it {
             SeqItem::Message { from, to, text, .. } => {
-                let tw = label_size(text, MSG_FONT, false).0;
+                let tw = label_size(text, MSG_FONT, false, font).0;
                 if from == to {
                     reqs.push((*from, from + 1, tw + 70.0));
                 } else {
@@ -63,7 +66,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
                 }
             }
             SeqItem::Note { place, targets, text, .. } => {
-                let tw = label_size(text, MSG_FONT, false).0 + 24.0;
+                let tw = label_size(text, MSG_FONT, false, font).0 + 24.0;
                 let lo = targets.iter().copied().min().unwrap_or(0);
                 let hi = targets.iter().copied().max().unwrap_or(0);
                 match place {
@@ -96,7 +99,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
     }
     let x_of = |i: usize| xs.get(i).copied().unwrap_or(0.0);
 
-    let mut scene = Scene { background: Some(t.background), ..Scene::default() };
+    let mut scene = Scene { background: Some(t.background), font, ..Scene::default() };
     let mut back: Vec<Prim> = Vec::new();
     let mut mid: Vec<Prim> = Vec::new();
     let mut front: Vec<Prim> = Vec::new();
@@ -119,9 +122,14 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
         match it {
             SeqItem::Message { from, to, text, arrow, activate, deactivate, .. } => {
                 touch(&mut frames, &[*from, *to]);
-                let th = if text.is_empty() { 0.0 } else { label_size(text, MSG_FONT, false).1 };
+                let th = if text.is_empty() { 0.0 } else { label_size(text, MSG_FONT, false, font).1 };
                 let (xa, xb) = (x_of(*from), x_of(*to));
-                let col = if opts.colorful { palette(*from).1 } else { t.line };
+                let sender = look::indexed(opts.colors, *from).map_or(t.line, |c| c.1);
+                let col = match (opts.colors, opts.arrows) {
+                    (ColorMode::Classic, _) => t.line,
+                    (_, Arrows::Graphite) => look::GRAPHITE,
+                    (_, Arrows::Source) => sender,
+                };
                 let dash = |p: Prim| if arrow.dotted { p.dash(5.0, 4.0) } else { p };
                 counter += 1;
                 if from == to {
@@ -129,7 +137,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
                     let r = xa + act.get(*from).map_or(0, Vec::len) as f32 * 5.0;
                     let cmds = vec![PathCmd::Move(r, y0), PathCmd::Line(r + 40.0, y0), PathCmd::Line(r + 40.0, y0 + 22.0), PathCmd::Line(r + 8.0, y0 + 22.0)];
                     front.push(dash(Prim::new(PrimShape::Path(cmds)).stroke(col, 1.6)));
-                    front.extend(head_prims(arrow_head(arrow.head), (r, y0 + 22.0), (-1.0, 0.0), col, 1.6, Tag::None));
+                    front.extend(head_prims(arrow_head(arrow.head), (r, y0 + 22.0), (-1.0, 0.0), col, 1.6, Tag::None, open));
                     if !text.is_empty() {
                         lines_block(&mut front, r + 46.0, y, text, MSG_FONT, t.text, Anchor::Start);
                     }
@@ -149,19 +157,20 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
                     let dt = act.get(*to).map_or(0, Vec::len);
                     let sa = xa + dir * if ds > 0 { 5.0 + (ds as f32 - 1.0) * 5.0 } else { 0.0 };
                     let sb = xb - dir * if dt > 0 || *activate { 5.0 + (dt as f32 - if *activate { 0.0 } else { 1.0 }).max(0.0) * 5.0 } else { 0.0 };
-                    let inset = if arrow.head == SeqHead::None { 0.0 } else { 8.0 };
-                    let inset_a = if arrow.both { 8.0 } else { 0.0 };
+                    let head_len = if open && arrow.head != SeqHead::Cross { 1.0 } else { 8.0 };
+                    let inset = if arrow.head == SeqHead::None { 0.0 } else { head_len };
+                    let inset_a = if arrow.both { head_len } else { 0.0 };
                     let cmds = vec![PathCmd::Move(sa + dir * inset_a, y0), PathCmd::Line(sb - dir * inset, y0)];
                     front.push(dash(Prim::new(PrimShape::Path(cmds)).stroke(col, 1.6)));
-                    front.extend(head_prims(arrow_head(arrow.head), (sb, y0), (dir, 0.0), col, 1.6, Tag::None));
+                    front.extend(head_prims(arrow_head(arrow.head), (sb, y0), (dir, 0.0), col, 1.6, Tag::None, open));
                     if arrow.both {
-                        front.extend(head_prims(arrow_head(arrow.head), (sa, y0), (-dir, 0.0), col, 1.6, Tag::None));
+                        front.extend(head_prims(arrow_head(arrow.head), (sa, y0), (-dir, 0.0), col, 1.6, Tag::None, open));
                     }
                     if !text.is_empty() {
                         lines_block(&mut front, (xa + xb) / 2.0, y, text, MSG_FONT, t.text, Anchor::Middle);
                     }
                     if seq.autonumber {
-                        front.push(Prim::new(PrimShape::Ellipse { cx: sa + dir * 2.0, cy: y0, rx: 8.0, ry: 8.0 }).fill(col));
+                        front.push(Prim::new(PrimShape::Ellipse { cx: sa + dir * 2.0, cy: y0, rx: 8.0, ry: 8.0 }).fill(sender));
                         front.push(text_prim(sa + dir * 2.0, y0 + 3.6, &counter.to_string(), 10.0, true, Anchor::Middle, [255, 255, 255, 255]));
                     }
                     if *activate {
@@ -179,7 +188,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
                 touch(&mut frames, targets);
                 let lo = targets.iter().copied().min().unwrap_or(0);
                 let hi = targets.iter().copied().max().unwrap_or(0);
-                let (tw, th) = label_size(text, MSG_FONT, false);
+                let (tw, th) = label_size(text, MSG_FONT, false, font);
                 let (x0, w) = match place {
                     NotePlace::Over => {
                         let span = (x_of(hi) - x_of(lo)) + 60.0;
@@ -245,7 +254,7 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
             continue;
         }
         back.push(Prim::new(PrimShape::Rect { x: x0, y: f.start_y, w: x1 - x0, h: y1 - f.start_y, r: 2.0 }).stroke([140, 140, 160, 255], 1.2));
-        let tag_w = text_width(f.kind.word(), 12.5, true) + 18.0;
+        let tag_w = text_width(f.kind.word(), 12.5, true, font) + 18.0;
         back.push(
             Prim::new(PrimShape::Polygon(vec![(x0, f.start_y), (x0 + tag_w, f.start_y), (x0 + tag_w, f.start_y + 10.0), (x0 + tag_w - 8.0, f.start_y + 19.0), (x0, f.start_y + 19.0)]))
                 .fill([232, 232, 240, 255])
@@ -273,13 +282,13 @@ pub fn render(seq: &Sequence, opts: &crate::RenderOptions) -> Scene {
         back.insert(0, Prim::new(PrimShape::Path(vec![PathCmd::Move(x, head_h), PathCmd::Line(x, end_y + 14.0)])).stroke([153, 153, 153, 255], 1.0).dash(5.0, 4.0));
         for top in [0.0, end_y + 14.0] {
             if p.actor {
-                let (fill, stroke) = if opts.colorful { palette(i) } else { (t.actor_fill, t.actor_stroke) };
+                let (fill, stroke) = look::indexed(opts.colors, i).unwrap_or((t.actor_fill, t.actor_stroke));
                 actor_figure(&mut heads, x, top, &p.label, t, fill, stroke);
             } else {
                 let w = box_w.get(i).copied().unwrap_or(100.0);
-                let (fill, stroke) = if opts.colorful { palette(i) } else { (t.actor_fill, t.actor_stroke) };
+                let (fill, stroke) = look::indexed(opts.colors, i).unwrap_or((t.actor_fill, t.actor_stroke));
                 heads.push(Prim::new(PrimShape::Rect { x: x - w / 2.0, y: top, w, h: BOX_H, r: 6.0 }).fill(fill).stroke(stroke, 1.8));
-                let lh = label_size(&p.label, FONT, false).1;
+                let lh = label_size(&p.label, FONT, false, font).1;
                 lines_block(&mut heads, x, top + (BOX_H - lh) / 2.0, &p.label, FONT, t.text, Anchor::Middle);
             }
         }

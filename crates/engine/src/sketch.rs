@@ -1,7 +1,8 @@
-//! Hand-drawn look: wobbly double strokes in the spirit of whiteboard sketches. Deterministic, so
-//! the same diagram always looks the same.
+//! Hand-drawn look: wobbly double strokes and hatch fills in the spirit of whiteboard sketches.
+//! Deterministic, so the same diagram always looks the same.
 
 use crate::geom::{P, add, len, norm, scale, smooth, sub};
+use crate::look::{Fill, luma, mix};
 use crate::scene::{PathCmd, Prim, PrimShape, Scene, Tag};
 
 struct Rng(u64);
@@ -107,20 +108,20 @@ fn flatten(cmds: &[PathCmd]) -> Vec<(Vec<P>, bool)> {
     out
 }
 
-/// A wobbly open line: samples every ~14 px, nudges sideways, and smooths.
-fn open_pass(pts: &[P], rng: &mut Rng) -> Vec<PathCmd> {
+/// A wobbly open line: samples every ~45 px, nudges sideways by `amp`, and smooths.
+fn open_pass(pts: &[P], rng: &mut Rng, amp: f32) -> Vec<PathCmd> {
     let mut dense: Vec<P> = Vec::new();
     for w in pts.windows(2) {
         let (Some(a), Some(b)) = (w.first().copied(), w.get(1).copied()) else { continue };
         let d = sub(b, a);
         let l = len(d);
-        let n = ((l / 30.0) as usize).clamp(1, 60);
+        let n = ((l / 45.0) as usize).clamp(1, 60);
         let nrm = norm(d);
         let perp = (-nrm.1, nrm.0);
         for k in 0..n {
             let t = k as f32 / n as f32;
             let p = add(a, scale(d, t));
-            dense.push(if k == 0 && dense.is_empty() { p } else { add(p, scale(perp, rng.next() * 0.5)) });
+            dense.push(if k == 0 && dense.is_empty() { p } else { add(p, scale(perp, rng.next() * amp)) });
         }
     }
     if let Some(last) = pts.last() {
@@ -133,9 +134,11 @@ fn is_edge_part(t: Tag) -> bool {
     matches!(t, Tag::Edge(_))
 }
 
-/// Turns every outline of the scene into hand-drawn strokes. Arrow heads and label backgrounds
-/// stay crisp so they remain readable.
-pub fn roughen(scene: &mut Scene) {
+/// Turns every outline of the scene into hand-drawn strokes; `amount` is 1 for the "artist" look
+/// and 2 for the "cartoonist" one. Arrow heads and label backgrounds stay crisp so they remain
+/// readable, and edges wobble less than shapes.
+pub fn roughen(scene: &mut Scene, amount: f32) {
+    let k = if amount.is_finite() { amount.clamp(0.0, 3.0) } else { 1.0 };
     let old = std::mem::take(&mut scene.prims);
     for (i, p) in old.into_iter().enumerate() {
         let mut rng = Rng::new(i as u64 + 1);
@@ -153,38 +156,40 @@ pub fn roughen(scene: &mut Scene) {
                 let pts = rounded_rect(*x, *y, *w, *h, *r);
                 scene.prims.extend(fill_only(PrimShape::Polygon(pts.clone())));
                 if p.dash.is_some() {
-                    scene.prims.push(stroke_prim(closed_pass(&pts, &mut rng, 0.8)));
+                    scene.prims.push(stroke_prim(closed_pass(&pts, &mut rng, 0.8 * k)));
                 } else {
-                    scene.prims.push(stroke_prim(closed_pass(&pts, &mut rng, 1.0)));
-                    scene.prims.push(stroke_prim(closed_pass(&pts, &mut rng, 1.3)));
+                    scene.prims.push(stroke_prim(closed_pass(&pts, &mut rng, 1.0 * k)));
+                    scene.prims.push(stroke_prim(closed_pass(&pts, &mut rng, 1.3 * k)));
                 }
             }
             PrimShape::Ellipse { cx, cy, rx, ry } if !is_edge_part(tag) && p.stroke.is_some() => {
                 let pts = ellipse_pts(*cx, *cy, *rx, *ry);
                 scene.prims.extend(fill_only(PrimShape::Polygon(pts.clone())));
-                let a = open_closed(&pts, &mut rng);
+                let a = open_closed(&pts, &mut rng, k);
                 scene.prims.push(stroke_prim(a));
-                let b = open_closed(&pts, &mut rng);
+                let b = open_closed(&pts, &mut rng, k);
                 scene.prims.push(stroke_prim(b));
             }
             PrimShape::Polygon(pts) if !is_edge_part(tag) && p.stroke.is_some() => {
                 scene.prims.extend(fill_only(PrimShape::Polygon(pts.clone())));
-                scene.prims.push(stroke_prim(closed_pass(pts, &mut rng, 1.0)));
-                scene.prims.push(stroke_prim(closed_pass(pts, &mut rng, 1.3)));
+                scene.prims.push(stroke_prim(closed_pass(pts, &mut rng, 1.0 * k)));
+                scene.prims.push(stroke_prim(closed_pass(pts, &mut rng, 1.3 * k)));
             }
             PrimShape::Path(cmds) if p.stroke.is_some() => {
                 let subs = flatten(cmds);
+                // Edges wobble less than outlines so they read as calm lines.
+                let line_amp = if is_edge_part(tag) { 0.3 * k } else { 0.5 * k };
                 if subs.iter().any(|(_, c)| *c) {
                     // Closed body (cylinder): keep the fill, hand-draw the outline.
                     scene.prims.extend(fill_only(PrimShape::Path(cmds.clone())));
                     for (pts, closed) in &subs {
-                        let c = if *closed { closed_pass(pts, &mut rng, 0.9) } else { open_pass(pts, &mut rng) };
+                        let c = if *closed { closed_pass(pts, &mut rng, 0.9 * k) } else { open_pass(pts, &mut rng, line_amp) };
                         scene.prims.push(stroke_prim(c));
                     }
                 } else {
                     let mut all: Vec<PathCmd> = Vec::new();
                     for (pts, _) in &subs {
-                        all.extend(open_pass(pts, &mut rng));
+                        all.extend(open_pass(pts, &mut rng, line_amp));
                     }
                     if all.is_empty() {
                         scene.prims.push(p);
@@ -199,13 +204,101 @@ pub fn roughen(scene: &mut Scene) {
 }
 
 /// A closed smooth loop with a little wobble (for ellipses).
-fn open_closed(pts: &[P], rng: &mut Rng) -> Vec<PathCmd> {
-    let mut v: Vec<P> = pts.iter().map(|p| add(*p, (rng.next() * 0.7, rng.next() * 0.7))).collect();
+fn open_closed(pts: &[P], rng: &mut Rng, k: f32) -> Vec<PathCmd> {
+    let mut v: Vec<P> = pts.iter().map(|p| add(*p, (rng.next() * 0.7 * k, rng.next() * 0.7 * k))).collect();
     // Overshoot a little past the start, as a hand does.
-    for k in 0..3 {
-        if let Some(p) = v.get(k).copied() {
-            v.push(add(p, (rng.next() * 0.9, rng.next() * 0.9)));
+    for i in 0..3 {
+        if let Some(p) = v.get(i).copied() {
+            v.push(add(p, (rng.next() * 0.9 * k, rng.next() * 0.9 * k)));
         }
     }
     smooth(&v)
+}
+
+/// Distance between hatch lines.
+const HATCH_GAP: f32 = 7.0;
+/// Most hatch lines drawn in one shape, whatever its size.
+const MAX_HATCH_LINES: usize = 600;
+
+/// Outline of a closed, filled shape as a polygon, if it has one.
+fn outline_of(shape: &PrimShape) -> Option<Vec<P>> {
+    let pts = match shape {
+        PrimShape::Rect { x, y, w, h, r } => rounded_rect(*x, *y, *w, *h, *r),
+        PrimShape::Ellipse { cx, cy, rx, ry } => ellipse_pts(*cx, *cy, *rx, *ry),
+        PrimShape::Polygon(pts) => pts.clone(),
+        PrimShape::Path(cmds) => flatten(cmds).into_iter().find(|(_, closed)| *closed).map(|(p, _)| p)?,
+        PrimShape::Text { .. } => return None,
+    };
+    let (x0, x1) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
+    let (y0, y1) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    (pts.len() >= 3 && x1 - x0 >= 14.0 && y1 - y0 >= 14.0 && (x1 - x0).is_finite() && (y1 - y0).is_finite()).then_some(pts)
+}
+
+/// Parallel segments at `angle` degrees, `gap` apart, clipped to the inside of `poly` and kept a
+/// little away from its outline.
+fn hatch_lines(poly: &[P], angle: f32, gap: f32) -> Vec<(P, P)> {
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let rot: Vec<P> = poly.iter().map(|p| (p.0 * cos + p.1 * sin, -p.0 * sin + p.1 * cos)).collect();
+    let back = |x: f32, y: f32| (x * cos - y * sin, x * sin + y * cos);
+    let (y_min, y_max) = rot.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    let mut out = Vec::new();
+    let mut y = y_min + gap / 2.0;
+    let n = rot.len();
+    while y < y_max && out.len() < MAX_HATCH_LINES {
+        let mut xs: Vec<f32> = Vec::new();
+        for i in 0..n {
+            let (Some(a), Some(b)) = (rot.get(i), rot.get((i + 1) % n)) else { continue };
+            if (a.1 <= y && b.1 > y) || (b.1 <= y && a.1 > y) {
+                xs.push(a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1));
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        for pair in xs.chunks(2) {
+            if let [x0, x1] = pair {
+                let (x0, x1) = (x0 + 2.5, x1 - 2.5);
+                if x1 - x0 >= 4.0 {
+                    out.push((back(x0, y), back(x1, y)));
+                }
+            }
+        }
+        y += gap;
+    }
+    out
+}
+
+/// Fills coloured, outlined shapes (nodes, actors, entity headers) with hatch lines over a pale
+/// base, keeping the text on top readable. Group frames, edges and white boxes stay as they are.
+pub fn hatch(scene: &mut Scene, fill: Fill, amount: f32) {
+    let angles: &[f32] = match fill {
+        Fill::Solid => return,
+        Fill::Hachure => &[-41.0],
+        Fill::CrossHatch => &[-41.0, 49.0],
+    };
+    let k = if amount.is_finite() { amount.clamp(0.0, 3.0) } else { 1.0 };
+    let old = std::mem::take(&mut scene.prims);
+    for (i, p) in old.into_iter().enumerate() {
+        let colour = p.fill.filter(|c| c[3] > 0 && luma(*c) < 247.0);
+        let eligible = !matches!(p.tag, Tag::Cluster(_) | Tag::Edge(_));
+        let (Some(base), Some(stroke), true) = (colour, p.stroke, eligible) else {
+            scene.prims.push(p);
+            continue;
+        };
+        let Some(poly) = outline_of(&p.shape) else {
+            scene.prims.push(p);
+            continue;
+        };
+        let line = mix(base, stroke, 0.3);
+        let tag = p.tag;
+        let mut under = p;
+        under.fill = Some(mix(base, [255, 255, 255, 255], 0.5));
+        scene.prims.push(under);
+        let mut rng = Rng::new(i as u64 + 7919);
+        for &angle in angles {
+            for (a, b) in hatch_lines(&poly, angle, HATCH_GAP) {
+                let a = add(a, (rng.next() * 0.8 * k, rng.next() * 0.8 * k));
+                let b = add(b, (rng.next() * 0.8 * k, rng.next() * 0.8 * k));
+                scene.prims.push(Prim::new(PrimShape::Path(vec![PathCmd::Move(a.0, a.1), PathCmd::Line(b.0, b.1)])).stroke(line, 1.3).tag(tag));
+            }
+        }
+    }
 }

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::geom::*;
 use crate::layout::{LEdge, LItem, LayoutResult, Spacing, layered};
+use crate::look::{self, Arrows, ColorMode, Font};
 use crate::model::*;
 use crate::scene::*;
 use crate::text::{label_size, split_lines};
@@ -80,8 +81,8 @@ fn resolve_style(fc: &Flowchart, n: &FlowNode, base: Option<(Color, Color)>) -> 
     st
 }
 
-fn node_size(n: &FlowNode) -> (f32, f32) {
-    let (tw, th) = label_size(&n.label, FONT, false);
+fn node_size(n: &FlowNode, font: Font) -> (f32, f32) {
+    let (tw, th) = label_size(&n.label, FONT, false, font);
     let (tw, th) = (tw.max(8.0), th.max(FONT * 1.25));
     let (w, h) = match n.shape {
         NodeShape::Rect | NodeShape::Round => (tw + 32.0, th + 22.0),
@@ -112,7 +113,7 @@ fn outline_of(shape: NodeShape) -> Outline {
     }
 }
 
-fn push_text_lines(scene: &mut Scene, cx: f32, cy: f32, label: &str, size: f32, color: Color, bold: bool, tag: Tag) {
+fn push_text_lines(scene: &mut Scene, cx: f32, cy: f32, label: &str, size: f32, color: Color, bold: bool, anchor: Anchor, tag: Tag) {
     let lines = split_lines(label);
     let lh = size * 1.25;
     let total = lh * lines.len() as f32;
@@ -121,7 +122,7 @@ fn push_text_lines(scene: &mut Scene, cx: f32, cy: f32, label: &str, size: f32, 
             continue;
         }
         let mid = cy - total / 2.0 + lh * (i as f32 + 0.5);
-        let shape = PrimShape::Text { x: cx, y: mid + size * 0.34, text: (*l).to_string(), size, bold, italic: false, mono: false, anchor: Anchor::Middle };
+        let shape = PrimShape::Text { x: cx, y: mid + size * 0.34, text: (*l).to_string(), size, bold, italic: false, mono: false, anchor };
         scene.push(Prim::new(shape).fill(color).tag(tag));
     }
 }
@@ -185,7 +186,7 @@ fn draw_node(scene: &mut Scene, idx: usize, n: &FlowNode, c: P, size: (f32, f32)
         NodeShape::TrapezoidAlt => scene.push(base(PrimShape::Polygon(vec![(x, y), (x + w, y), (x + w - s, y + h), (x + s, y + h)]))),
         NodeShape::Asymmetric => scene.push(base(PrimShape::Polygon(vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x + s * 0.8, c.1)]))),
     }
-    push_text_lines(scene, c.0, c.1, &n.label, FONT, st.text, false, tag);
+    push_text_lines(scene, c.0, c.1, &n.label, FONT, st.text, false, Anchor::Middle, tag);
 }
 
 struct Level {
@@ -241,6 +242,46 @@ fn color_slot(fc: &Flowchart, n: usize) -> usize {
     }
 }
 
+/// Colour role of a shape in the "by shape" mode.
+fn role_hue(shape: NodeShape) -> look::Hue {
+    match shape {
+        NodeShape::Diamond => look::YELLOW,
+        NodeShape::Stadium | NodeShape::Circle | NodeShape::DoubleCircle => look::GREEN,
+        NodeShape::Cylinder => look::VIOLET,
+        NodeShape::Subroutine => look::BLUE,
+        NodeShape::Hexagon => look::ORANGE,
+        NodeShape::Parallelogram | NodeShape::ParallelogramAlt | NodeShape::Trapezoid | NodeShape::TrapezoidAlt => look::CYAN,
+        NodeShape::Rect | NodeShape::Round | NodeShape::Asymmetric => look::GRAY,
+    }
+}
+
+/// Fill and stroke a node starts from (before `classDef` and `style`); `None` for the classic
+/// Mermaid colours.
+fn node_base(fc: &Flowchart, i: usize, mode: ColorMode) -> Option<(Color, Color)> {
+    let n = fc.nodes.get(i)?;
+    let h = match mode {
+        ColorMode::Classic => return None,
+        ColorMode::PerNode => return Some(palette(color_slot(fc, i))),
+        ColorMode::Neutral => look::GRAY,
+        ColorMode::Shape => role_hue(n.shape),
+        ColorMode::Group => n.parent.map_or_else(|| role_hue(n.shape), look::hue_at),
+    };
+    Some((h.light, h.stroke))
+}
+
+/// Fill, border, dashed border and title colour of a group frame.
+fn cluster_colors(mode: ColorMode, s: usize) -> (Color, Color, bool, Color) {
+    let t = &DEFAULT_THEME;
+    match mode {
+        ColorMode::Classic => (t.cluster_fill, t.cluster_stroke, false, t.text),
+        ColorMode::PerNode => (tint(palette(s).0, 0.4), palette(s).1, true, t.text),
+        ColorMode::Neutral | ColorMode::Group | ColorMode::Shape => {
+            let h = if mode == ColorMode::Neutral { look::GRAY } else { look::hue_at(s) };
+            (h.pale, look::mix(h.hatch, h.stroke, 0.4), true, h.stroke)
+        }
+    }
+}
+
 fn tint(c: Color, k: f32) -> Color {
     let m = |v: u8| (f32::from(v) * k + 255.0 * (1.0 - k)).round().clamp(0.0, 255.0) as u8;
     [m(c[0]), m(c[1]), m(c[2]), 255]
@@ -250,7 +291,8 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     let t = &DEFAULT_THEME;
     let nn = fc.nodes.len();
     let ns = fc.subgraphs.len();
-    let node_sizes: Vec<(f32, f32)> = fc.nodes.iter().map(node_size).collect();
+    let font = opts.font;
+    let node_sizes: Vec<(f32, f32)> = fc.nodes.iter().map(|n| node_size(n, font)).collect();
 
     // Levels: 0 is the root, c + 1 is subgraph c.
     let mut members: Vec<Vec<Item>> = vec![Vec::new(); ns + 1];
@@ -337,7 +379,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         for (ei, a, b) in level_edges.get(lvl).map(Vec::as_slice).unwrap_or(&[]) {
             let (Some(ia), Some(ib)) = (index.get(a), index.get(b)) else { continue };
             let label = fc.edges.get(*ei).and_then(|e| e.label.as_ref()).filter(|l| !l.is_empty()).map(|l| {
-                let (w, h) = label_size(l, LABEL_FONT, false);
+                let (w, h) = label_size(l, LABEL_FONT, false, font);
                 (w + 12.0, h + 8.0)
             });
             let min_len = fc.edges.get(*ei).map_or(1, |e| e.kind.min_len);
@@ -349,7 +391,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         if lvl > 0 {
             let s = lvl - 1;
             let title = fc.subgraphs.get(s).map(|x| x.title.as_str()).unwrap_or("");
-            let (tw, th) = if title.is_empty() { (0.0, 0.0) } else { label_size(title, TITLE_FONT, true) };
+            let (tw, th) = if title.is_empty() { (0.0, 0.0) } else { label_size(title, TITLE_FONT, true, font) };
             let th_total = if title.is_empty() { 0.0 } else { th + 10.0 };
             let (iw, ih) = if items.is_empty() { (40.0, 20.0) } else { (layout.width, layout.height) };
             if let Some(v) = sub_inner.get_mut(s) {
@@ -458,7 +500,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     }
 
     // ---- drawing ------------------------------------------------------------------------
-    let mut scene = Scene { background: Some(t.background), ..Scene::default() };
+    let mut scene = Scene { background: Some(t.background), font, ..Scene::default() };
     scene.node_boxes = (0..nn)
         .map(|i| {
             let (w, h) = node_sizes.get(i).copied().unwrap_or((0.0, 0.0));
@@ -470,10 +512,19 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     for &s in &by_depth_asc {
         let b = sub_box.get(s).copied().unwrap_or_default();
         let tag = Tag::Cluster(s);
-        scene.push(Prim::new(PrimShape::Rect { x: b.x, y: b.y, w: b.w, h: b.h, r: 4.0 }).fill(if opts.colorful { tint(palette(s).0, 0.4) } else { t.cluster_fill }).stroke(if opts.colorful { palette(s).1 } else { t.cluster_stroke }, 1.6).dash_if(opts.colorful).tag(tag));
+        let (fill, stroke, dashed, title_col) = cluster_colors(opts.colors, s);
+        let classic = opts.colors == ColorMode::Classic;
+        scene.push(Prim::new(PrimShape::Rect { x: b.x, y: b.y, w: b.w, h: b.h, r: if classic { 4.0 } else { 10.0 } }).fill(fill).stroke(stroke, 1.6).dash_if(dashed).tag(tag));
         if let Some(sg) = fc.subgraphs.get(s) {
             if !sg.title.is_empty() {
-                push_text_lines(&mut scene, b.x + b.w / 2.0, b.y + 6.0 + label_size(&sg.title, TITLE_FONT, true).1 / 2.0, &sg.title, TITLE_FONT, t.text, true, tag);
+                let cy = b.y + 6.0 + label_size(&sg.title, TITLE_FONT, true, font).1 / 2.0;
+                // The classic look centres the title; the others keep it in the top-left corner,
+                // out of the way of edges that enter the frame from above.
+                if classic {
+                    push_text_lines(&mut scene, b.x + b.w / 2.0, cy, &sg.title, TITLE_FONT, title_col, true, Anchor::Middle, tag);
+                } else {
+                    push_text_lines(&mut scene, b.x + 12.0, cy, &sg.title, TITLE_FONT, title_col, true, Anchor::Start, tag);
+                }
             }
         }
     }
@@ -506,11 +557,13 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         let (ca, wa, ha, oa) = center_of(a);
         let (cb, wb, hb, ob) = center_of(b);
         let tag = Tag::Edge(ei);
-        let ecol: Color = match (opts.colorful, a) {
-            (true, Item::Node(n)) => palette(color_slot(fc, n)).1,
-            (true, Item::Sub(sg)) => palette(sg).1,
-            _ => t.line,
+        let ecol: Color = match (opts.colors, opts.arrows, a) {
+            (ColorMode::Classic, _, _) => t.line,
+            (_, Arrows::Graphite, _) => look::GRAPHITE,
+            (mode, Arrows::Source, Item::Node(n)) => node_base(fc, n, mode).map_or(t.line, |c| c.1),
+            (mode, Arrows::Source, Item::Sub(sg)) => cluster_colors(mode, sg).3,
         };
+        let open = opts.colorful();
         let width = match e.kind.style {
             LineStyle::Thick => 3.5,
             _ => 1.8,
@@ -523,14 +576,14 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             let bot = ca.1 + ha / 4.0;
             let cmds = vec![PathCmd::Move(r, top), PathCmd::Cubic(r + 38.0, top - 16.0, r + 38.0, bot + 16.0, r - 1.0, bot)];
             let sampled = sample(&cmds);
-            label_at = Some((r + 40.0 + label_size(e.label.as_deref().unwrap_or(""), LABEL_FONT, false).0 / 2.0, ca.1));
+            label_at = Some((r + 40.0 + label_size(e.label.as_deref().unwrap_or(""), LABEL_FONT, false, font).0 / 2.0, ca.1));
             if e.kind.style != LineStyle::Invisible {
                 let mut p = Prim::new(PrimShape::Path(cmds)).stroke(ecol, width).tag(tag);
                 if e.kind.style == LineStyle::Dotted {
                     p = p.dash(4.0, 3.5);
                 }
                 scene.push(p);
-                for hp in head_prims(e.kind.head_end, (r, bot), (-1.0, 0.0), ecol, width, tag) {
+                for hp in head_prims(e.kind.head_end, (r, bot), (-1.0, 0.0), ecol, width, tag, open) {
                     scene.push(hp);
                 }
             }
@@ -567,8 +620,8 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             let start_dir = norm(sub(pts.first().copied().unwrap_or_default(), pts.get(1).copied().unwrap_or_default()));
             let tip_end = pts.get(n - 1).copied().unwrap_or_default();
             let tip_start = pts.first().copied().unwrap_or_default();
-            let inset_end = head_inset(e.kind.head_end, width);
-            let inset_start = head_inset(e.kind.head_start, width);
+            let inset_end = head_inset(e.kind.head_end, width, open);
+            let inset_start = head_inset(e.kind.head_start, width, open);
             if let Some(p) = pts.get_mut(n - 1) {
                 *p = sub(tip_end, scale(end_dir, inset_end));
             }
@@ -586,10 +639,10 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
                     p = p.dash(4.0, 3.5);
                 }
                 scene.push(p);
-                for hp in head_prims(e.kind.head_end, tip_end, end_dir, ecol, width, tag) {
+                for hp in head_prims(e.kind.head_end, tip_end, end_dir, ecol, width, tag, open) {
                     scene.push(hp);
                 }
-                for hp in head_prims(e.kind.head_start, tip_start, start_dir, ecol, width, tag) {
+                for hp in head_prims(e.kind.head_start, tip_start, start_dir, ecol, width, tag, open) {
                     scene.push(hp);
                 }
             }
@@ -598,10 +651,11 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             }
         }
         if let (Some(label), Some(at)) = (e.label.as_ref().filter(|l| !l.is_empty()), label_at) {
-            let (tw, th) = label_size(label, LABEL_FONT, false);
-            label_prims.push(Prim::new(PrimShape::Rect { x: at.0 - tw / 2.0 - 5.0, y: at.1 - th / 2.0 - 3.0, w: tw + 10.0, h: th + 6.0, r: 3.0 }).fill(if opts.colorful { [255, 255, 255, 255] } else { t.label_bg }).tag(tag));
+            let (tw, th) = label_size(label, LABEL_FONT, false, font);
+            label_prims.push(Prim::new(PrimShape::Rect { x: at.0 - tw / 2.0 - 5.0, y: at.1 - th / 2.0 - 3.0, w: tw + 10.0, h: th + 6.0, r: 3.0 }).fill(if opts.colorful() { [255, 255, 255, 255] } else { t.label_bg }).tag(tag));
             let mut tmp = Scene::default();
-            push_text_lines(&mut tmp, at.0, at.1, label, LABEL_FONT, t.text, false, tag);
+            let label_col = if opts.colorful() { look::GRAPHITE } else { t.text };
+            push_text_lines(&mut tmp, at.0, at.1, label, LABEL_FONT, label_col, false, Anchor::Middle, tag);
             label_prims.append(&mut tmp.prims);
         }
     }
@@ -610,7 +664,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     }
     // Nodes on top of the edge ends.
     for (i, n) in fc.nodes.iter().enumerate() {
-        let st = resolve_style(fc, n, opts.colorful.then(|| palette(color_slot(fc, i))));
+        let st = resolve_style(fc, n, node_base(fc, i, opts.colors));
         draw_node(&mut scene, i, n, node_c.get(i).copied().unwrap_or((0.0, 0.0)), node_sizes.get(i).copied().unwrap_or((50.0, 38.0)), &st);
     }
     scene.finish(24.0);

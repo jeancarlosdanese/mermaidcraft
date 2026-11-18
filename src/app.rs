@@ -64,8 +64,7 @@ struct Shot {
 pub struct App {
     lang: Lang,
     dark: bool,
-    sketch: bool,
-    colorful: bool,
+    look: engine::RenderOptions,
     text: String,
     path: Option<PathBuf>,
     md: Option<MdState>,
@@ -104,6 +103,43 @@ fn read_text(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "not valid UTF-8 text".to_string())
 }
 
+/// The View › Appearance menu: every choice of the diagram look, plus a reset.
+fn appearance_menu(ui: &mut egui::Ui, lang: Lang, look: &mut engine::RenderOptions) {
+    use engine::look::{Arrows, ColorMode, Fill, Font, Stroke};
+    let tr = |s: &'static str| crate::i18n::t(lang, s);
+    let heading = |ui: &mut egui::Ui, s: &'static str| {
+        ui.label(egui::RichText::new(tr(s)).small().strong());
+    };
+    heading(ui, "Font");
+    for f in Font::ALL {
+        ui.radio_value(&mut look.font, *f, f.family());
+    }
+    ui.separator();
+    heading(ui, "Colors");
+    for (v, l) in [(ColorMode::Group, "By group"), (ColorMode::Shape, "By shape"), (ColorMode::Neutral, "Neutral"), (ColorMode::PerNode, "One per node"), (ColorMode::Classic, "Classic (Mermaid)")] {
+        ui.radio_value(&mut look.colors, v, tr(l));
+    }
+    ui.separator();
+    heading(ui, "Fill");
+    for (v, l) in [(Fill::Solid, "Solid"), (Fill::Hachure, "Hatched"), (Fill::CrossHatch, "Cross-hatched")] {
+        ui.radio_value(&mut look.fill, v, tr(l));
+    }
+    ui.separator();
+    heading(ui, "Stroke");
+    for (v, l) in [(Stroke::Clean, "Clean"), (Stroke::Artist, "Artist"), (Stroke::Cartoonist, "Cartoonist")] {
+        ui.radio_value(&mut look.stroke, v, tr(l));
+    }
+    ui.separator();
+    heading(ui, "Arrows");
+    for (v, l) in [(Arrows::Graphite, "Graphite"), (Arrows::Source, "Color of the source node")] {
+        ui.radio_value(&mut look.arrows, v, tr(l));
+    }
+    ui.separator();
+    if ui.add_enabled(*look != engine::RenderOptions::default(), egui::Button::new(tr("Restore default"))).clicked() {
+        *look = engine::RenderOptions::default();
+    }
+}
+
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let add = |fonts: &mut egui::FontDefinitions, name: &str, data: &'static [u8]| {
@@ -118,7 +154,21 @@ fn setup_fonts(ctx: &egui::Context) {
     if let Some(fallback) = fonts.families.get(&egui::FontFamily::Proportional) {
         bold.extend(fallback.iter().filter(|n| n.as_str() != "lib-sans").cloned());
     }
-    fonts.families.insert(paint::bold_family(), bold);
+    fonts.families.insert(paint::bold_family(), bold.clone());
+    // One family (and its bold) per diagram font, falling back to the interface fonts for
+    // characters the hand-drawn faces lack.
+    let fallback: Vec<String> = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    for f in engine::look::Font::ALL {
+        let (reg, bld) = (format!("d-{}", f.id()), format!("d-{}-b", f.id()));
+        add(&mut fonts, &reg, f.regular());
+        add(&mut fonts, &bld, f.bold());
+        let mut fam = vec![reg.clone()];
+        fam.extend(fallback.iter().cloned());
+        fonts.families.insert(paint::diagram_family(*f, false), fam);
+        let mut fam_b = vec![bld, reg];
+        fam_b.extend(bold.iter().cloned());
+        fonts.families.insert(paint::diagram_family(*f, true), fam_b);
+    }
     ctx.set_fonts(fonts);
 }
 
@@ -126,13 +176,12 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: Options) -> Self {
         setup_fonts(&cc.egui_ctx);
         let shot_mode = opts.screenshot.is_some();
-        let settings = if shot_mode { Settings { lang: crate::i18n::detect(), dark: false, sketch: true, colorful: true } } else { Settings::load() };
+        let settings = if shot_mode { Settings::fresh() } else { Settings::load() };
         opts.events.set_wake(&cc.egui_ctx);
         let mut app = App {
             lang: settings.lang,
             dark: settings.dark,
-            sketch: settings.sketch,
-            colorful: settings.colorful,
+            look: settings.look,
             text: String::new(),
             path: None,
             md: None,
@@ -220,7 +269,7 @@ impl App {
     }
 
     fn opts(&self) -> engine::RenderOptions {
-        engine::RenderOptions { sketch: self.sketch, colorful: self.colorful }
+        self.look
     }
 
     /// Swaps the drawn scene, keeping what is on screen where it was when the content moved.
@@ -589,11 +638,10 @@ impl App {
                 if ui.checkbox(&mut self.dark, dark_label).changed() {
                     self.save_settings();
                 }
-                let sketch_label = self.tr("Hand-drawn look");
-                let color_label = self.tr("Colors follow the flow");
-                let a = ui.checkbox(&mut self.sketch, sketch_label).changed();
-                let b = ui.checkbox(&mut self.colorful, color_label).changed();
-                if a || b {
+                let mut look = self.look;
+                ui.menu_button(self.tr("Appearance"), |ui| appearance_menu(ui, self.lang, &mut look));
+                if look != self.look {
+                    self.look = look;
                     self.save_settings();
                     self.reparse();
                 }
@@ -618,7 +666,7 @@ impl App {
 
     fn save_settings(&self) {
         if self.shot.is_none() {
-            Settings { lang: self.lang, dark: self.dark, sketch: self.sketch, colorful: self.colorful }.save();
+            Settings { lang: self.lang, dark: self.dark, look: self.look }.save();
         }
     }
 

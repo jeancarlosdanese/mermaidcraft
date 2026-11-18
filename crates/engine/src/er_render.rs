@@ -4,6 +4,7 @@ use crate::geom::*;
 use crate::layout::{LEdge, LItem, Spacing, layered};
 use crate::model::*;
 use crate::scene::*;
+use crate::look::{self, Font};
 use crate::text::{label_size, text_width};
 
 const FONT: f32 = 14.0;
@@ -16,14 +17,14 @@ struct Table {
     cols: [f32; 4],
 }
 
-fn table_of(e: &ErEntity) -> Table {
-    let hw = text_width(&e.label, 15.0, true) + 32.0;
+fn table_of(e: &ErEntity, font: Font) -> Table {
+    let hw = text_width(&e.label, 15.0, true, font) + 32.0;
     let mut cols = [0f32; 4];
     for a in &e.attributes {
-        cols[0] = cols[0].max(text_width(&a.ty, FONT, false));
-        cols[1] = cols[1].max(text_width(&a.name, FONT, false));
-        cols[2] = cols[2].max(text_width(&a.keys.join(", "), FONT, false));
-        cols[3] = cols[3].max(text_width(&a.comment, FONT - 1.0, false));
+        cols[0] = cols[0].max(text_width(&a.ty, FONT, false, font));
+        cols[1] = cols[1].max(text_width(&a.name, FONT, false, font));
+        cols[2] = cols[2].max(text_width(&a.keys.join(", "), FONT, false, font));
+        cols[3] = cols[3].max(text_width(&a.comment, FONT - 1.0, false, font));
     }
     let mut cw = 0.0;
     for c in &mut cols {
@@ -91,8 +92,9 @@ fn marker(out: &mut Vec<Prim>, card: Cardinality, p: P, d: P, color: Color) {
 }
 
 pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
+    let font = opts.font;
     let t = &DEFAULT_THEME;
-    let tables: Vec<Table> = er.entities.iter().map(table_of).collect();
+    let tables: Vec<Table> = er.entities.iter().map(|e| table_of(e, font)).collect();
     let items: Vec<LItem> = tables.iter().map(|tb| LItem { w: tb.w, h: tb.h }).collect();
     let edges: Vec<LEdge> = er
         .relations
@@ -104,13 +106,13 @@ pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
             label: if r.label.is_empty() {
                 None
             } else {
-                let (w, h) = label_size(&r.label, FONT, false);
+                let (w, h) = label_size(&r.label, FONT, false, font);
                 Some((w + 14.0, h + 8.0))
             },
         })
         .collect();
     let layout = layered(&items, &edges, er.direction, Spacing { node_sep: 70.0, rank_sep: 90.0, edge_sep: 20.0 });
-    let mut scene = Scene { background: Some(t.background), ..Scene::default() };
+    let mut scene = Scene { background: Some(t.background), font, ..Scene::default() };
     scene.edge_paths = vec![Vec::new(); er.relations.len()];
     let center = |i: usize| layout.centers.get(i).copied().unwrap_or((0.0, 0.0));
     let mut tops: Vec<Prim> = Vec::new();
@@ -127,7 +129,7 @@ pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
             pts = vec![(x, ca.1 - 14.0), (x + 46.0, ca.1 - 20.0), (x + 46.0, ca.1 + 20.0), (x, ca.1 + 14.0)];
             da = (1.0, 0.0);
             db = (1.0, 0.0);
-            label_at = Some((x + 46.0 + text_width(&r.label, FONT, false) / 2.0 + 8.0, ca.1));
+            label_at = Some((x + 46.0 + text_width(&r.label, FONT, false, font) / 2.0 + 8.0, ca.1));
         } else {
             let mut inner: Vec<P> = layout.edge_points.get(ri).cloned().unwrap_or_default();
             let first = inner.first().copied().unwrap_or(cb);
@@ -160,7 +162,7 @@ pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
             *slot = sampled;
         }
         if let (false, Some(at)) = (r.label.is_empty(), label_at) {
-            let (tw, th) = label_size(&r.label, FONT, false);
+            let (tw, th) = label_size(&r.label, FONT, false, font);
             tops.push(Prim::new(PrimShape::Rect { x: at.0 - tw / 2.0 - 6.0, y: at.1 - th / 2.0 - 3.0, w: tw + 12.0, h: th + 6.0, r: 3.0 }).fill([255, 255, 255, 255]).tag(tag));
             tops.push(text(at.0, at.1 + FONT * 0.34, &r.label, FONT, false, Anchor::Middle, t.text).tag(tag));
         }
@@ -173,7 +175,7 @@ pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
         let c = center(i);
         let (x, y) = (c.0 - tb.w / 2.0, c.1 - tb.h / 2.0);
         let tag = Tag::Node(i);
-        let (hfill, hstroke) = if opts.colorful { palette(i) } else { (t.node_fill, t.node_stroke) };
+        let (hfill, hstroke) = look::indexed(opts.colors, i).unwrap_or((t.node_fill, t.node_stroke));
         scene.push(Prim::new(PrimShape::Rect { x, y, w: tb.w, h: tb.h, r: 0.0 }).fill([255, 255, 255, 255]).stroke(hstroke, 1.8).tag(tag));
         scene.push(Prim::new(PrimShape::Rect { x, y, w: tb.w, h: HEAD_H, r: 0.0 }).fill(hfill).stroke(hstroke, 1.8).tag(tag));
         scene.push(text(c.0, y + HEAD_H / 2.0 + 5.2, &e.label, 15.0, true, Anchor::Middle, t.text).tag(tag));

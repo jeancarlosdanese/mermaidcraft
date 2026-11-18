@@ -110,6 +110,8 @@ pub struct Scene {
     pub edge_paths: Vec<Vec<(f32, f32)>>,
     /// Total translation applied by `finish` to the raw layout coordinates.
     pub shift: (f32, f32),
+    /// Typeface of the text.
+    pub font: crate::look::Font,
 }
 
 impl Scene {
@@ -184,11 +186,12 @@ impl Scene {
         let h = self.height.max(1.0);
         let mut s = String::with_capacity(self.prims.len() * 120 + 400);
         s.push_str(&format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" font-family=\"{}, Arial, Helvetica, sans-serif\">\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" font-family=\"'{}', '{}', Arial, Helvetica, sans-serif\">\n",
             n(w),
             n(h),
             n(w),
             n(h),
+            self.font.family(),
             crate::text::FONT_FAMILY
         ));
         if let Some(bg) = self.background {
@@ -305,7 +308,7 @@ impl Scene {
                     }
                 }
                 PrimShape::Text { x, y, text, size, bold, anchor, .. } => {
-                    let w = crate::text::text_width(text, *size, *bold);
+                    let w = crate::text::text_width(text, *size, *bold, self.font);
                     let (x0, x1) = match anchor {
                         Anchor::Start => (*x, x + w),
                         Anchor::Middle => (x - w / 2.0, x + w / 2.0),
