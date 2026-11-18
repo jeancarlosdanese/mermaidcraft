@@ -9,6 +9,7 @@ pub mod flow_render;
 pub mod flowchart;
 pub mod geom;
 pub mod layout;
+pub mod look;
 pub mod markdown;
 pub mod model;
 pub mod scene;
@@ -94,29 +95,34 @@ pub fn parse(src: &str) -> Parsed {
     Parsed { diagram, diagnostics: diags }
 }
 
-/// How a diagram is drawn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How a diagram is drawn. The default is the hand-drawn look (proposal A).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct RenderOptions {
-    /// Hand-drawn strokes.
-    pub sketch: bool,
-    /// Pastel colours that follow the flow (one colour per step of the diagram).
-    pub colorful: bool,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self { sketch: true, colorful: true }
-    }
+    pub font: look::Font,
+    pub colors: look::ColorMode,
+    pub fill: look::Fill,
+    pub stroke: look::Stroke,
+    pub arrows: look::Arrows,
 }
 
 impl RenderOptions {
-    /// Plain look: thin straight lines and the classic Mermaid colours.
+    /// Plain look: straight lines, Liberation Sans and the classic Mermaid colours.
     pub fn clean() -> Self {
-        Self { sketch: false, colorful: false }
+        Self { font: look::Font::Liberation, colors: look::ColorMode::Classic, fill: look::Fill::Solid, stroke: look::Stroke::Clean, arrows: look::Arrows::Graphite }
+    }
+
+    /// Hand-drawn strokes.
+    pub fn sketch(&self) -> bool {
+        self.stroke != look::Stroke::Clean
+    }
+
+    /// Pastel colours instead of the classic Mermaid ones.
+    pub fn colorful(&self) -> bool {
+        self.colors != look::ColorMode::Classic
     }
 }
 
-/// Draws a diagram into a scene with the default (hand-drawn, colourful) look.
+/// Draws a diagram into a scene with the default (hand-drawn) look.
 pub fn render_scene(d: &Diagram) -> Scene {
     render_scene_with(d, &RenderOptions::default())
 }
@@ -127,10 +133,14 @@ pub fn render_scene_with(d: &Diagram, opts: &RenderOptions) -> Scene {
         Diagram::Sequence(s) => seq_render::render(s, opts),
         Diagram::Er(e) => er_render::render(e, opts),
     };
-    if opts.sketch {
-        sketch::roughen(&mut scene);
-        scene.finish(24.0);
+    scene.font = opts.font;
+    if opts.fill != look::Fill::Solid {
+        sketch::hatch(&mut scene, opts.fill, opts.stroke.amount());
     }
+    if opts.sketch() {
+        sketch::roughen(&mut scene, opts.stroke.amount());
+    }
+    scene.finish(24.0);
     scene
 }
 

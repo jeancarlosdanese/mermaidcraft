@@ -19,7 +19,7 @@ pub fn command_list() -> Value {
     json!([
         {"name": "info", "usage": "info <file|-> [--block N] [--detail]", "description": "Diagram type, node and edge counts, errors and warnings, as JSON."},
         {"name": "check", "usage": "check <file|-> [--block N] [--json]", "description": "Validate the syntax. Exit code 1 when there are errors."},
-        {"name": "render", "usage": "render <file|-> -o <out.svg|png|pdf> [--format svg|png|pdf] [--scale 1|2|3] [--look sketch|clean] [--block N]", "description": "Draw the diagram to SVG, PNG or PDF."},
+        {"name": "render", "usage": "render <file|-> -o <out.svg|png|pdf> [--format svg|png|pdf] [--scale 1|2|3] [--look sketch|clean] [--font F] [--colors C] [--fill F] [--stroke S] [--arrows A] [--block N]", "description": "Draw the diagram to SVG, PNG or PDF. Fonts: shantell (default), patrick-hand, kalam, architects-daughter, liberation. Colors: group (default), shape, neutral, per-node, classic. Fill: solid (default), hachure, cross-hatch. Stroke: clean, artist (default), cartoonist. Arrows: graphite (default), source."},
         {"name": "convert", "usage": "convert <in> <out> [--scale N] [--block N]", "description": "Convert between .mmd, .md (one block), .svg, .png and .pdf by file extension."},
         {"name": "new", "usage": "new <flowchart|sequence|er> [-o file.mmd]", "description": "Write a starter diagram."},
         {"name": "commands", "usage": "commands", "description": "List the commands and the MCP tools, as JSON."},
@@ -174,6 +174,40 @@ pub fn look_from_name(name: &str) -> Result<engine::RenderOptions, String> {
     }
 }
 
+/// Look choices given by name; each one left out keeps the value of the base `look`.
+#[derive(Clone, Debug, Default)]
+pub struct LookArgs {
+    pub look: Option<String>,
+    pub font: Option<String>,
+    pub colors: Option<String>,
+    pub fill: Option<String>,
+    pub stroke: Option<String>,
+    pub arrows: Option<String>,
+}
+
+impl LookArgs {
+    pub fn options(&self) -> Result<engine::RenderOptions, String> {
+        use engine::look::{Arrows, ColorMode, Fill, Font, Stroke};
+        let mut o = look_from_name(self.look.as_deref().unwrap_or("sketch"))?;
+        if let Some(v) = &self.font {
+            o.font = Font::from_id(v).ok_or_else(|| format!("unknown font '{v}': use {}", Font::ids()))?;
+        }
+        if let Some(v) = &self.colors {
+            o.colors = ColorMode::from_id(v).ok_or_else(|| format!("unknown colors '{v}': use {}", ColorMode::ids()))?;
+        }
+        if let Some(v) = &self.fill {
+            o.fill = Fill::from_id(v).ok_or_else(|| format!("unknown fill '{v}': use {}", Fill::ids()))?;
+        }
+        if let Some(v) = &self.stroke {
+            o.stroke = Stroke::from_id(v).ok_or_else(|| format!("unknown stroke '{v}': use {}", Stroke::ids()))?;
+        }
+        if let Some(v) = &self.arrows {
+            o.arrows = Arrows::from_id(v).ok_or_else(|| format!("unknown arrows '{v}': use {}", Arrows::ids()))?;
+        }
+        Ok(o)
+    }
+}
+
 pub fn render_bytes_with(src: &str, format: Format, scale: f32, opts: &engine::RenderOptions) -> Result<Vec<u8>, String> {
     match engine::render_source_with(src, opts) {
         Ok((scene, diags)) => {
@@ -203,13 +237,13 @@ struct Args {
     format: Option<String>,
     scale: Option<f32>,
     block: Option<usize>,
-    look: Option<String>,
+    look: LookArgs,
     json: bool,
     detail: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut a = Args { positional: Vec::new(), output: None, format: None, scale: None, block: None, look: None, json: false, detail: false };
+    let mut a = Args { positional: Vec::new(), output: None, format: None, scale: None, block: None, look: LookArgs::default(), json: false, detail: false };
     let mut it = args.iter();
     while let Some(x) = it.next() {
         let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} needs a value"));
@@ -224,7 +258,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 let v = value("--block")?;
                 a.block = Some(v.parse::<usize>().map_err(|_| format!("'{v}' is not a block number"))?);
             }
-            "--look" => a.look = Some(value("--look")?),
+            "--look" => a.look.look = Some(value("--look")?),
+            "--font" => a.look.font = Some(value("--font")?),
+            "--colors" | "--colours" => a.look.colors = Some(value("--colors")?),
+            "--fill" => a.look.fill = Some(value("--fill")?),
+            "--stroke" => a.look.stroke = Some(value("--stroke")?),
+            "--arrows" => a.look.arrows = Some(value("--arrows")?),
             "--json" => a.json = true,
             "--detail" => a.detail = true,
             s if s.starts_with('-') && s != "-" => return Err(format!("unknown option '{s}'")),
@@ -242,6 +281,10 @@ Commands:
   info <file|->      type, nodes, edges and errors as JSON (--detail lists them)
   check <file|->     validate the syntax (exit 1 on errors; --json for JSON)
   render <file|->    draw to SVG, PNG or PDF: -o <out> [--format F] [--scale 1|2|3] [--look sketch|clean]
+                     look: --font shantell|patrick-hand|kalam|architects-daughter|liberation
+                           --colors group|shape|neutral|per-node|classic
+                           --fill solid|hachure|cross-hatch  --stroke clean|artist|cartoonist
+                           --arrows graphite|source
   convert <in> <out> convert by extension (.mmd .md .svg .png .pdf)
   new <type>         write a starter diagram (flowchart, sequence, er) [-o file]
   commands           list commands and MCP tools as JSON
@@ -360,7 +403,7 @@ fn run_inner(argv: &[String]) -> Result<i32, String> {
                 return Ok(0);
             }
             let format = format.ok_or("cannot tell the output format: use -o file.svg|png|pdf or --format")?;
-            let look = look_from_name(a.look.as_deref().unwrap_or("sketch"))?;
+            let look = a.look.options()?;
             let bytes = render_bytes_with(&loaded.code, format, scale, &look)?;
             write_output(&output, &bytes)?;
             Ok(0)

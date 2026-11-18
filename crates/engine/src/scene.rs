@@ -49,11 +49,13 @@ pub struct Prim {
     pub stroke_width: f32,
     pub dash: Option<(f32, f32)>,
     pub tag: Tag,
+    /// A hatch line inside a filled shape: already hand-drawn, so `roughen` leaves it alone.
+    pub fill_line: bool,
 }
 
 impl Prim {
     pub fn new(shape: PrimShape) -> Self {
-        Self { shape, fill: None, stroke: None, stroke_width: 1.0, dash: None, tag: Tag::None }
+        Self { shape, fill: None, stroke: None, stroke_width: 1.0, dash: None, tag: Tag::None, fill_line: false }
     }
     pub fn fill(mut self, c: Color) -> Self {
         self.fill = Some(c);
@@ -110,6 +112,8 @@ pub struct Scene {
     pub edge_paths: Vec<Vec<(f32, f32)>>,
     /// Total translation applied by `finish` to the raw layout coordinates.
     pub shift: (f32, f32),
+    /// Typeface of the text.
+    pub font: crate::look::Font,
 }
 
 impl Scene {
@@ -184,11 +188,12 @@ impl Scene {
         let h = self.height.max(1.0);
         let mut s = String::with_capacity(self.prims.len() * 120 + 400);
         s.push_str(&format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" font-family=\"{}, Arial, Helvetica, sans-serif\">\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" font-family=\"'{}', '{}', Arial, Helvetica, sans-serif\">\n",
             n(w),
             n(h),
             n(w),
             n(h),
+            self.font.family(),
             crate::text::FONT_FAMILY
         ));
         if let Some(bg) = self.background {
@@ -305,7 +310,7 @@ impl Scene {
                     }
                 }
                 PrimShape::Text { x, y, text, size, bold, anchor, .. } => {
-                    let w = crate::text::text_width(text, *size, *bold);
+                    let w = crate::text::text_width(text, *size, *bold, self.font);
                     let (x0, x1) = match anchor {
                         Anchor::Start => (*x, x + w),
                         Anchor::Middle => (x - w / 2.0, x + w / 2.0),

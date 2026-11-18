@@ -227,3 +227,97 @@ fn looks_render() {
         }
     }
 }
+
+#[test]
+fn default_look_is_proposal_a() {
+    use look::*;
+    let o = RenderOptions::default();
+    assert_eq!((o.font, o.colors, o.fill, o.stroke, o.arrows), (Font::Shantell, ColorMode::Group, Fill::Solid, Stroke::Artist, Arrows::Graphite));
+    let (s, _) = render_source(edit::template("flowchart")).unwrap();
+    assert!(s.to_svg().contains("font-family=\"'Shantell Sans'"));
+    let (c, _) = render_source_with(edit::template("flowchart"), &RenderOptions::clean()).unwrap();
+    assert!(c.to_svg().contains("font-family=\"'Liberation Sans'"));
+}
+
+#[test]
+fn every_look_option_renders_and_labels_fit() {
+    use look::*;
+    let src = "flowchart TD\n  A[Uma etiqueta bem comprida] --> B{Decisão?}\n  subgraph G [Grupo]\n    C([Ação]) --> D[(Dados)]\n  end\n  B -->|sim| C\n";
+    for font in Font::ALL {
+        for fill in Fill::ALL {
+            let opts = RenderOptions { font: *font, fill: *fill, ..RenderOptions::default() };
+            let (s, _) = render_source_with(src, &opts).unwrap();
+            assert_eq!(s.font, *font);
+            let w = text::text_width("Uma etiqueta bem comprida", 15.0, false, *font);
+            assert!(s.node_boxes[0].w > w + 20.0, "{font:?}: box {} text {w}", s.node_boxes[0].w);
+            assert!(export::svg_to_png(&s.to_svg(), 1.0).is_ok());
+        }
+    }
+    for colors in ColorMode::ALL {
+        for stroke in Stroke::ALL {
+            for arrows in Arrows::ALL {
+                let opts = RenderOptions { colors: *colors, stroke: *stroke, arrows: *arrows, ..RenderOptions::default() };
+                assert!(render_source_with(src, &opts).is_ok());
+            }
+        }
+    }
+}
+
+#[test]
+fn colours_follow_group_or_shape() {
+    use look::*;
+    use scene::{PrimShape, Tag};
+    let src = "flowchart TD\n  A{Ok?} --> B\n  subgraph G [Grupo]\n    B[Passo]\n  end\n";
+    let fill_of = |opts: RenderOptions, node: usize| {
+        let (s, _) = render_source_with(src, &RenderOptions { stroke: Stroke::Clean, ..opts }).unwrap();
+        s.prims.iter().find(|p| p.tag == Tag::Node(node) && !matches!(p.shape, PrimShape::Text { .. }) && p.fill.is_some()).and_then(|p| p.fill).unwrap()
+    };
+    let group = RenderOptions::default();
+    assert_eq!(fill_of(group, 0), YELLOW.light, "a loose decision follows its shape");
+    assert_eq!(fill_of(group, 1), hue_at(0).light, "a node in a group takes the group colour");
+    let shape = RenderOptions { colors: ColorMode::Shape, ..group };
+    assert_eq!(fill_of(shape, 1), GRAY.light);
+    let neutral = RenderOptions { colors: ColorMode::Neutral, ..group };
+    assert_eq!(fill_of(neutral, 0), GRAY.light);
+}
+
+#[test]
+fn hatching_adds_lines_and_is_deterministic() {
+    use look::*;
+    let src = edit::template("flowchart");
+    let solid = render_source_with(src, &RenderOptions::default()).unwrap().0;
+    let opts = RenderOptions { fill: Fill::CrossHatch, ..RenderOptions::default() };
+    let a = render_source_with(src, &opts).unwrap().0;
+    let b = render_source_with(src, &opts).unwrap().0;
+    assert!(a.prims.len() > solid.prims.len() + 20);
+    assert_eq!(a.to_svg(), b.to_svg());
+}
+
+#[test]
+fn hatching_cost_is_bounded_with_hostile_input() {
+    use look::*;
+    use scene::PrimShape;
+    // Many huge notes (the shape the review used to make the hatch blow up).
+    let tall = vec!["a"; 300].join("<br>");
+    let mut src = String::from("sequenceDiagram\n  participant A\n  participant B\n");
+    for _ in 0..30 {
+        src.push_str(&format!("  Note over A,B: {tall}\n"));
+    }
+    let opts = RenderOptions { fill: Fill::CrossHatch, stroke: Stroke::Cartoonist, ..RenderOptions::default() };
+    let started = std::time::Instant::now();
+    let (s, _) = render_source_with(&src, &opts).unwrap();
+    let hatch = s.prims.iter().filter(|p| p.fill_line).count();
+    assert!(hatch > 0 && hatch <= sketch::HATCH_BUDGET, "hatch lines: {hatch}");
+    let cmds: usize = s.prims.iter().map(|p| if let PrimShape::Path(c) = &p.shape { c.len() } else { 1 }).sum();
+    assert!(cmds < 200_000, "drawing commands: {cmds}");
+    assert!(started.elapsed().as_secs() < 20);
+}
+
+#[test]
+fn arrows_option_reaches_er_edges() {
+    use look::*;
+    let src = edit::template("er");
+    let graphite = render_source(src).unwrap().0.to_svg();
+    let source = render_source_with(src, &RenderOptions { arrows: Arrows::Source, ..RenderOptions::default() }).unwrap().0.to_svg();
+    assert_ne!(graphite, source);
+}

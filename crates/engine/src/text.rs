@@ -1,17 +1,42 @@
-//! Text measurement with the embedded Liberation Sans (OFL), so that the app, the CLI and the
-//! exported files all agree on the size of a label.
+//! Text measurement with the embedded fonts (OFL), so that the app, the CLI and the exported
+//! files all agree on the size of a label in every font the look can use.
 
 use std::sync::OnceLock;
 
-/// Embedded fonts (SIL Open Font License, see `assets/fonts/OFL.txt`).
+use crate::look::Font;
+
+/// Embedded fonts (SIL Open Font License: `assets/fonts/OFL.txt` for Liberation and
+/// `assets/fonts/OFL-<family>.txt` for the hand-drawn faces).
 pub const SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-Regular.ttf");
 pub const SANS_BOLD: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-Bold.ttf");
 pub const SANS_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-Italic.ttf");
 pub const SANS_BOLD_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/LiberationSans-BoldItalic.ttf");
 pub const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/LiberationMono-Regular.ttf");
 pub const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/LiberationMono-Bold.ttf");
+pub const SHANTELL_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/ShantellSans-Regular.ttf");
+pub const SHANTELL_BOLD: &[u8] = include_bytes!("../../../assets/fonts/ShantellSans-Bold.ttf");
+pub const PATRICK_HAND_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/PatrickHand-Regular.ttf");
+pub const KALAM_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Kalam-Regular.ttf");
+pub const KALAM_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Kalam-Bold.ttf");
+pub const ARCHITECTS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/ArchitectsDaughter-Regular.ttf");
 
-/// The family name used in generated SVG.
+/// Every diagram font file, for font databases.
+pub const ALL_FONT_DATA: &[&[u8]] = &[
+    SANS_REGULAR,
+    SANS_BOLD,
+    SANS_ITALIC,
+    SANS_BOLD_ITALIC,
+    MONO_REGULAR,
+    MONO_BOLD,
+    SHANTELL_REGULAR,
+    SHANTELL_BOLD,
+    PATRICK_HAND_REGULAR,
+    KALAM_REGULAR,
+    KALAM_BOLD,
+    ARCHITECTS_REGULAR,
+];
+
+/// The fallback family of generated SVG (and the family of the clean look).
 pub const FONT_FAMILY: &str = "Liberation Sans";
 
 /// Default font size of diagram text, in pixels.
@@ -35,18 +60,27 @@ fn build(data: &[u8]) -> Option<(Vec<u16>, f32)> {
     Some((table, units))
 }
 
-fn metrics() -> &'static Metrics {
-    static M: OnceLock<Metrics> = OnceLock::new();
-    M.get_or_init(|| {
-        let (regular, units) = build(SANS_REGULAR).unwrap_or((Vec::new(), 2048.0));
-        let (bold, _) = build(SANS_BOLD).unwrap_or((Vec::new(), 2048.0));
-        Metrics { regular, bold, units }
-    })
+fn metrics(font: Font) -> &'static Metrics {
+    static M: OnceLock<Vec<Metrics>> = OnceLock::new();
+    let all = M.get_or_init(|| {
+        Font::ALL
+            .iter()
+            .map(|f| {
+                let (regular, units) = build(f.regular()).unwrap_or((Vec::new(), 2048.0));
+                let (bold, _) = build(f.bold()).unwrap_or((Vec::new(), 2048.0));
+                Metrics { regular, bold, units }
+            })
+            .collect()
+    });
+    let i = Font::ALL.iter().position(|f| *f == font).unwrap_or(0);
+    // `all` always holds one entry per font; the empty fallback is never reached.
+    static EMPTY: Metrics = Metrics { regular: Vec::new(), bold: Vec::new(), units: 2048.0 };
+    all.get(i).unwrap_or(&EMPTY)
 }
 
-/// Width of one line of text at `size` pixels.
-pub fn text_width(text: &str, size: f32, bold: bool) -> f32 {
-    let m = metrics();
+/// Width of one line of text at `size` pixels in `font`.
+pub fn text_width(text: &str, size: f32, bold: bool, font: Font) -> f32 {
+    let m = metrics(font);
     let table = if bold { &m.bold } else { &m.regular };
     let mut total = 0.0f32;
     for ch in text.chars().take(4096) {
@@ -70,8 +104,8 @@ pub fn split_lines(label: &str) -> Vec<&str> {
 }
 
 /// Size (width, height) of a multi-line label.
-pub fn label_size(label: &str, size: f32, bold: bool) -> (f32, f32) {
+pub fn label_size(label: &str, size: f32, bold: bool, font: Font) -> (f32, f32) {
     let lines = split_lines(label);
-    let w = lines.iter().map(|l| text_width(l, size, bold)).fold(0.0f32, f32::max);
+    let w = lines.iter().map(|l| text_width(l, size, bold, font)).fold(0.0f32, f32::max);
     (w, lines.len() as f32 * size * 1.25)
 }

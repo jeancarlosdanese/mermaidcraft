@@ -46,7 +46,12 @@ fn tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "required": ["output_path"], "properties": {
                 "path": {"type": "string"}, "source": {"type": "string"}, "block": {"type": "integer"},
                 "output_path": {"type": "string", "description": "File to write; its extension (.svg, .png, .pdf) picks the format."},
-                "format": {"type": "string", "enum": ["svg", "png", "pdf"]}, "scale": {"type": "number", "description": "PNG scale: 1, 2 or 3."}, "look": {"type": "string", "enum": ["sketch", "clean"], "description": "sketch (default): hand-drawn, colourful; clean: classic Mermaid look."}}}}),
+                "format": {"type": "string", "enum": ["svg", "png", "pdf"]}, "scale": {"type": "number", "description": "PNG scale: 1, 2 or 3."}, "look": {"type": "string", "enum": ["sketch", "clean"], "description": "sketch (default): hand-drawn, colourful; clean: classic Mermaid look. The fields below change one part of it."},
+                "font": {"type": "string", "enum": ["shantell", "patrick-hand", "kalam", "architects-daughter", "liberation"]},
+                "colors": {"type": "string", "enum": ["group", "shape", "neutral", "per-node", "classic"], "description": "group: colour of the subgraph; shape: by the role of the shape (decision, start/end, data)."},
+                "fill": {"type": "string", "enum": ["solid", "hachure", "cross-hatch"]},
+                "stroke": {"type": "string", "enum": ["clean", "artist", "cartoonist"], "description": "How hand-drawn the lines are."},
+                "arrows": {"type": "string", "enum": ["graphite", "source"], "description": "Edge colour: graphite, or the colour of the node it leaves from."}}}}),
         json!({"name": "markdown_blocks", "description": "List the ```mermaid blocks of a Markdown file.",
             "inputSchema": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}),
     ]
@@ -192,7 +197,8 @@ fn call(name: &str, a: &Value) -> Result<Value, String> {
                 None => Format::from_path(out_path).ok_or("the output must end in .svg, .png or .pdf")?,
             };
             let scale = a.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
-            let look = crate::look_from_name(arg_str(a, "look").unwrap_or("sketch"))?;
+            let s = |k: &str| arg_str(a, k).map(str::to_string);
+            let look = crate::LookArgs { look: s("look"), font: s("font"), colors: s("colors"), fill: s("fill"), stroke: s("stroke"), arrows: s("arrows") }.options()?;
             let bytes = crate::render_bytes_with(&code, format, scale, &look)?;
             std::fs::write(out_path, &bytes).map_err(|e| format!("cannot write '{out_path}': {e}"))?;
             Ok(json!({"path": out_path, "bytes": bytes.len()}))

@@ -3,6 +3,7 @@
 use egui::epaint::PathShape;
 use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Shape, Stroke, Vec2};
 use mermaidcraft_engine::geom::dist_to_segment;
+use mermaidcraft_engine::look::Font;
 use mermaidcraft_engine::scene::{Anchor, PathCmd, PrimShape, Scene, Tag};
 
 /// Where the scene is on screen: `screen = origin + scene * zoom`.
@@ -25,8 +26,9 @@ fn col(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
 
-pub fn bold_family() -> FontFamily {
-    FontFamily::Name("bold".into())
+/// The egui family of a diagram font (registered at start-up for every font of the look).
+pub fn diagram_family(font: Font, bold: bool) -> FontFamily {
+    FontFamily::Name(format!("d-{}{}", font.id(), if bold { "-b" } else { "" }).into())
 }
 
 /// Turns path commands into polylines (one per sub-path) with a flag for closed ones.
@@ -130,7 +132,7 @@ pub fn draw(painter: &Painter, scene: &Scene, view: &View) {
                 }
             }
             PrimShape::Text { x, y, text, size, bold, anchor, .. } => {
-                let family = if *bold { bold_family() } else { FontFamily::Proportional };
+                let family = diagram_family(scene.font, *bold);
                 let align = match anchor {
                     Anchor::Start => Align2::LEFT_CENTER,
                     Anchor::Middle => Align2::CENTER_CENTER,

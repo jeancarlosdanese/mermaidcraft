@@ -115,11 +115,21 @@ pub fn dist_to_segment(p: P, a: P, b: P) -> f32 {
 }
 
 /// An arrow head or marker at `tip` pointing along `dir` (unit vector). Returns primitives.
-pub fn head_prims(kind: crate::model::Head, tip: P, dir: P, color: [u8; 4], width: f32, tag: crate::scene::Tag) -> Vec<Prim> {
+/// Shapes of an edge head. `open` draws the arrow as an open "V" instead of a filled triangle;
+/// renderers ask for it in every colour mode except the classic Mermaid one.
+pub fn head_prims(kind: crate::model::Head, tip: P, dir: P, color: [u8; 4], width: f32, tag: crate::scene::Tag, open: bool) -> Vec<Prim> {
     use crate::model::Head;
     let perp = (-dir.1, dir.0);
     match kind {
         Head::None => Vec::new(),
+        Head::Arrow if open => {
+            let l = 11.0 + width;
+            let w = 5.5 + width * 0.5;
+            let back = sub(tip, scale(dir, l));
+            let a = add(back, scale(perp, w));
+            let b = sub(back, scale(perp, w));
+            vec![Prim::new(PrimShape::Path(vec![PathCmd::Move(a.0, a.1), PathCmd::Line(tip.0, tip.1), PathCmd::Line(b.0, b.1)])).stroke(color, width.max(1.6)).tag(tag)]
+        }
         Head::Arrow => {
             let l = 10.0 + width;
             let w = 4.5 + width * 0.6;
@@ -146,10 +156,11 @@ pub fn head_prims(kind: crate::model::Head, tip: P, dir: P, color: [u8; 4], widt
 }
 
 /// How far the line should stop before the tip for a head.
-pub fn head_inset(kind: crate::model::Head, width: f32) -> f32 {
+pub fn head_inset(kind: crate::model::Head, width: f32, open: bool) -> f32 {
     use crate::model::Head;
     match kind {
         Head::None => 0.0,
+        Head::Arrow if open => width * 0.6,
         Head::Arrow => 9.0 + width,
         Head::Circle => 10.0,
         Head::Cross => 8.0,
