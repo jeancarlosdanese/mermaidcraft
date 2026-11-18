@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant S as Server
+    actor DB as Database
+    U->>+S: Sign in
+    S->>DB: Look up user
+    DB-->>S: Row
+    alt valid password
+        S-->>-U: Welcome back
+    else wrong password
+        S--xU: Access denied
+    end
+    Note over U,S: Session starts
+    loop Every minute
+        U-)S: Heartbeat
+    end

@@ -1,0 +1,387 @@
+//! Visual edits of a flowchart expressed as changes to the source text, so comments, order and
+//! formatting are kept as far as possible.
+
+use std::collections::HashSet;
+
+use crate::flowchart;
+use crate::model::*;
+use crate::util::*;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditError {
+    NotFlowchart,
+    NoSuchNode(String),
+    NoSuchEdge(usize),
+    InvalidId(String),
+    DuplicateId(String),
+    Invalid(String),
+}
+
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFlowchart => write!(f, "this edit only works on flowcharts"),
+            Self::NoSuchNode(id) => write!(f, "there is no node '{id}'"),
+            Self::NoSuchEdge(i) => write!(f, "there is no edge number {i}"),
+            Self::InvalidId(id) => write!(f, "'{id}' is not a valid node name (use letters, digits and '_')"),
+            Self::DuplicateId(id) => write!(f, "the name '{id}' is already used"),
+            Self::Invalid(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for EditError {}
+
+fn load(src: &str) -> Result<Flowchart, EditError> {
+    if src.len() > MAX_SOURCE_BYTES {
+        return Err(EditError::Invalid("the diagram is too large".into()));
+    }
+    let lines = split_lines(src);
+    let first = first_significant(&lines).ok_or(EditError::NotFlowchart)?;
+    let head = lines.get(first).map_or("", |l| l.text.trim());
+    let word = head.split(|c: char| c.is_whitespace() || c == ';').next().unwrap_or("");
+    if !matches!(word, "graph" | "flowchart" | "flowchart-elk") {
+        return Err(EditError::NotFlowchart);
+    }
+    let mut d = Vec::new();
+    Ok(flowchart::parse(&lines, first, &mut d))
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') && !id.starts_with('-') && !id.ends_with('-') && id != "end"
+}
+
+/// A name that no node or subgraph uses yet: A, B, ... Z, A1, B1, ...
+pub fn fresh_id(src: &str) -> String {
+    let (nodes, subs): (HashSet<String>, HashSet<String>) = match load(src) {
+        Ok(fc) => (fc.nodes.iter().map(|n| n.id.clone()).collect(), fc.subgraphs.iter().map(|s| s.id.clone()).collect()),
+        Err(_) => (HashSet::new(), HashSet::new()),
+    };
+    for round in 0..200 {
+        for c in 'A'..='Z' {
+            let id = if round == 0 { c.to_string() } else { format!("{c}{round}") };
+            if !nodes.contains(&id) && !subs.contains(&id) && id != "end" {
+                return id;
+            }
+        }
+    }
+    "N".to_string()
+}
+
+fn indent_of(src: &str) -> String {
+    for line in src.lines().rev() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("%%") {
+            continue;
+        }
+        if line.len() != line.trim_start().len() {
+            return line.get(..line.len() - line.trim_start().len()).unwrap_or("    ").to_string();
+        }
+        break;
+    }
+    "    ".to_string()
+}
+
+fn append_line(src: &str, line: &str) -> String {
+    let mut out = src.trim_end_matches([' ', '\t']).to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&indent_of(src));
+    out.push_str(line);
+    out.push('\n');
+    out
+}
+
+fn shape_text(shape: NodeShape, label: &str) -> String {
+    let (o, c) = shape.brackets();
+    format!("{o}{}{c}", quote_if_needed(label))
+}
+
+fn apply(src: &str, mut edits: Vec<(Span, String)>) -> Result<String, EditError> {
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
+    let mut out = src.to_string();
+    let mut last_start = usize::MAX;
+    for (span, text) in edits {
+        if span.end > last_start || span.end > out.len() || !out.is_char_boundary(span.start) || !out.is_char_boundary(span.end) {
+            return Err(EditError::Invalid("could not apply the edit to the text".into()));
+        }
+        out.replace_range(span.start..span.end, &text);
+        last_start = span.start;
+    }
+    Ok(out)
+}
+
+/// Adds a node on a new line at the end. Returns the new text and the id used.
+pub fn add_node(src: &str, id: Option<&str>, label: &str, shape: NodeShape) -> Result<(String, String), EditError> {
+    let fc = load(src)?;
+    let id = match id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(i) => {
+            if !valid_id(i) {
+                return Err(EditError::InvalidId(i.to_string()));
+            }
+            if fc.node_index(i).is_some() || fc.subgraph_index(i).is_some() {
+                return Err(EditError::DuplicateId(i.to_string()));
+            }
+            i.to_string()
+        }
+        None => fresh_id(src),
+    };
+    let label = if label.trim().is_empty() { id.as_str() } else { label.trim() };
+    let line = format!("{id}{}", shape_text(shape, label));
+    Ok((append_line(src, &line), id))
+}
+
+/// Changes the label and/or the shape of a node.
+pub fn set_node(src: &str, id: &str, label: Option<&str>, shape: Option<NodeShape>) -> Result<String, EditError> {
+    let fc = load(src)?;
+    let idx = fc.node_index(id).ok_or_else(|| EditError::NoSuchNode(id.to_string()))?;
+    let node = fc.nodes.get(idx).ok_or_else(|| EditError::NoSuchNode(id.to_string()))?;
+    let new_label = label.map_or(node.label.clone(), |l| l.trim().to_string());
+    let new_label = if new_label.is_empty() { node.id.clone() } else { new_label };
+    let new_shape = shape.unwrap_or(node.shape);
+    let text = shape_text(new_shape, &new_label);
+    let span = match node.def_span {
+        Some(s) => s,
+        None => Span::new(node.id_span.end, node.id_span.end),
+    };
+    apply(src, vec![(span, text)])
+}
+
+/// Adds a link on a new line at the end.
+pub fn add_edge(src: &str, from: &str, to: &str, label: Option<&str>, kind: LinkKind) -> Result<String, EditError> {
+    let fc = load(src)?;
+    for id in [from, to] {
+        let known = fc.node_index(id).is_some() || fc.subgraph_index(id).is_some();
+        if !known && !valid_id(id) {
+            return Err(EditError::InvalidId(id.to_string()));
+        }
+        if !known {
+            return Err(EditError::NoSuchNode(id.to_string()));
+        }
+    }
+    let lab = label.map(str::trim).filter(|l| !l.is_empty()).map_or(String::new(), |l| format!("|{}|", l.replace('|', "/")));
+    let line = format!("{from} {}{lab} {to}", kind.token());
+    Ok(append_line(src, &line))
+}
+
+#[derive(Default)]
+struct Removals {
+    nodes: HashSet<String>,
+    /// Edge indexes.
+    edges: HashSet<usize>,
+}
+
+fn rebuild(src: &str, fc: &Flowchart, rm: &Removals) -> Result<String, EditError> {
+    let mut edits: Vec<(Span, String)> = Vec::new();
+    for (si, st) in fc.statements.iter().enumerate() {
+        let text_of = |s: Span| src.get(s.start..s.end).unwrap_or("").to_string();
+        match &st.kind {
+            StmtKind::Chain { groups, links } => {
+                let touched = groups.iter().any(|g| g.nodes.iter().any(|n| rm.nodes.contains(&n.id))) || fc.edges.iter().enumerate().any(|(ei, e)| e.stmt == si && rm.edges.contains(&ei));
+                if !touched {
+                    continue;
+                }
+                let remaining: Vec<Vec<&NodeRef>> = groups.iter().map(|g| g.nodes.iter().filter(|n| !rm.nodes.contains(&n.id)).collect()).collect();
+                let intact: Vec<bool> = groups.iter().zip(&remaining).map(|(g, r)| g.nodes.len() == r.len()).collect();
+                let link_removed = |li: usize| -> bool {
+                    fc.edges.iter().enumerate().any(|(ei, e)| e.stmt == si && e.link == li && rm.edges.contains(&ei))
+                };
+                let mut statements: Vec<String> = Vec::new();
+                let mut mentioned: HashSet<String> = HashSet::new();
+                let gtext = |i: usize| -> String { remaining.get(i).map(|r| r.iter().map(|n| text_of(n.span)).collect::<Vec<_>>().join(" & ")).unwrap_or_default() };
+                let mut i = 0usize;
+                while i < groups.len() {
+                    let mut j = i;
+                    while j + 1 < groups.len() && intact.get(j) == Some(&true) && intact.get(j + 1) == Some(&true) && !link_removed(j) {
+                        j += 1;
+                    }
+                    if j > i {
+                        let mut s = gtext(i);
+                        for k in i..j {
+                            s.push(' ');
+                            s.push_str(&links.get(k).map_or(String::new(), |l| text_of(l.span)));
+                            s.push(' ');
+                            s.push_str(&gtext(k + 1));
+                        }
+                        statements.push(s);
+                        for k in i..=j {
+                            for n in remaining.get(k).map(Vec::as_slice).unwrap_or(&[]) {
+                                mentioned.insert(n.id.clone());
+                            }
+                        }
+                    }
+                    // The link after the segment (if any) was cut: keep the edges that survive.
+                    if j + 1 < groups.len() {
+                        if let Some(l) = links.get(j) {
+                            for a in remaining.get(j).map(Vec::as_slice).unwrap_or(&[]) {
+                                for b in remaining.get(j + 1).map(Vec::as_slice).unwrap_or(&[]) {
+                                    let dead = fc.edges.iter().enumerate().any(|(ei, e)| e.stmt == si && e.link == j && e.from == a.id && e.to == b.id && rm.edges.contains(&ei));
+                                    if !dead {
+                                        statements.push(format!("{} {} {}", text_of(a.span), text_of(l.span), text_of(b.span)));
+                                        mentioned.insert(a.id.clone());
+                                        mentioned.insert(b.id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    i = j + 1;
+                }
+                for r in &remaining {
+                    for n in r {
+                        if !mentioned.contains(&n.id) {
+                            statements.push(text_of(n.span));
+                            mentioned.insert(n.id.clone());
+                        }
+                    }
+                }
+                let text = if statements.is_empty() {
+                    "\u{0}".to_string()
+                } else {
+                    let indent = line_indent(src, st.span.start);
+                    statements.join(&format!("\n{indent}"))
+                };
+                edits.push((st.span, text));
+            }
+            StmtKind::Keyword { word, ids } => {
+                if !matches!(word.as_str(), "style" | "class") || !ids.iter().any(|n| rm.nodes.contains(&n.id)) {
+                    continue;
+                }
+                let keep: Vec<&NodeRef> = ids.iter().filter(|n| !rm.nodes.contains(&n.id)).collect();
+                if keep.is_empty() {
+                    edits.push((st.span, "\u{0}".to_string()));
+                } else {
+                    let first = ids.first().map_or(st.span.start, |n| n.span.start);
+                    let last = ids.last().map_or(st.span.end, |n| n.span.end);
+                    let prefix = src.get(st.span.start..first).unwrap_or("");
+                    let suffix = src.get(last..st.span.end).unwrap_or("");
+                    let list = keep.iter().map(|n| n.id.as_str()).collect::<Vec<_>>().join(",");
+                    edits.push((st.span, format!("{prefix}{list}{suffix}")));
+                }
+            }
+        }
+    }
+    let out = apply(src, edits)?;
+    Ok(clean_markers(&out))
+}
+
+fn line_indent(src: &str, at: usize) -> String {
+    let line_start = src.get(..at).map_or(0, |s| s.rfind('\n').map_or(0, |i| i + 1));
+    let seg = src.get(line_start..at).unwrap_or("");
+    seg.chars().take_while(|c| c.is_whitespace()).collect()
+}
+
+/// Removes the deletion marker and the lines or separators it leaves empty.
+fn clean_markers(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for raw in s.split_inclusive('\n') {
+        if !raw.contains('\u{0}') {
+            out.push_str(raw);
+            continue;
+        }
+        let ending = if raw.ends_with("\r\n") { "\r\n" } else if raw.ends_with('\n') { "\n" } else { "" };
+        let body = raw.trim_end_matches(['\r', '\n']);
+        let mut cleaned = body.replace('\u{0}', "");
+        // Separators left behind: `; ;`, a leading or trailing `;`.
+        while cleaned.contains(";;") || cleaned.contains("; ;") {
+            cleaned = cleaned.replace("; ;", ";").replace(";;", ";");
+        }
+        let trimmed = cleaned.trim();
+        let trimmed = trimmed.trim_start_matches(';').trim_end_matches(';').trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent: String = cleaned.chars().take_while(|c| c.is_whitespace()).collect();
+        out.push_str(&indent);
+        out.push_str(trimmed);
+        out.push_str(ending);
+    }
+    out
+}
+
+pub fn remove_node(src: &str, id: &str) -> Result<String, EditError> {
+    let fc = load(src)?;
+    if fc.node_index(id).is_none() {
+        return Err(EditError::NoSuchNode(id.to_string()));
+    }
+    let mut rm = Removals::default();
+    rm.nodes.insert(id.to_string());
+    rebuild(src, &fc, &rm)
+}
+
+pub fn remove_edge(src: &str, edge: usize) -> Result<String, EditError> {
+    let fc = load(src)?;
+    if edge >= fc.edges.len() {
+        return Err(EditError::NoSuchEdge(edge));
+    }
+    let mut rm = Removals::default();
+    rm.edges.insert(edge);
+    rebuild(src, &fc, &rm)
+}
+
+/// Changes the label (`Some(None)` clears it) and/or the kind of an edge.
+pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Option<LinkKind>) -> Result<String, EditError> {
+    let fc = load(src)?;
+    let e = fc.edges.get(edge).ok_or(EditError::NoSuchEdge(edge))?;
+    let new_label: Option<String> = match label {
+        Some(l) => l.map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+        None => e.label.clone(),
+    };
+    let new_kind = kind.unwrap_or(e.kind);
+    let lab = new_label.as_ref().map_or(String::new(), |l| format!("|{}|", l.replace('|', "/")));
+    let token = format!("{}{lab}", new_kind.token());
+    if let Some(Stmt { kind: StmtKind::Chain { groups, links }, .. }) = fc.statements.get(e.stmt) {
+        let single = groups.get(e.link).is_some_and(|g| g.nodes.len() == 1) && groups.get(e.link + 1).is_some_and(|g| g.nodes.len() == 1);
+        if single {
+            if let Some(l) = links.get(e.link) {
+                return apply(src, vec![(l.span, token)]);
+            }
+        }
+    }
+    // The link is shared by several edges (`A & B --> C`): move this edge to its own line.
+    let (from, to) = (e.from.clone(), e.to.clone());
+    let removed = remove_edge(src, edge)?;
+    Ok(append_line(&removed, &format!("{from} {token} {to}")))
+}
+
+pub fn set_direction(src: &str, dir: Direction) -> Result<String, EditError> {
+    let fc = load(src)?;
+    let span = fc.direction_span;
+    let text = if span.is_empty() { format!(" {}", dir.code()) } else { dir.code().to_string() };
+    apply(src, vec![(span, text)])
+}
+
+/// Starter text for a new diagram of each supported type.
+pub fn template(kind: &str) -> &'static str {
+    match kind {
+        "sequence" | "sequenceDiagram" => "sequenceDiagram\n    participant A as Alice\n    participant B as Bob\n    A->>B: Hello Bob, how are you?\n    B-->>A: Great!\n",
+        "er" | "erDiagram" => "erDiagram\n    CUSTOMER ||--o{ ORDER : places\n    CUSTOMER {\n        string name\n        string email PK\n    }\n    ORDER {\n        int id PK\n        date created\n    }\n",
+        _ => "flowchart TD\n    A[Start] --> B{Is it working?}\n    B -->|Yes| C[Great]\n    B -->|No| D[Fix it]\n    D --> B\n",
+    }
+}
+
+/// Stores the moved-node offsets in a `%% mermaidcraft:layout` comment (replacing the old one);
+/// an empty map removes the comment.
+pub fn set_offsets(src: &str, offsets: &std::collections::BTreeMap<String, (f32, f32)>) -> Result<String, EditError> {
+    load(src)?;
+    let mut out = String::with_capacity(src.len() + 64);
+    for raw in src.split_inclusive('\n') {
+        if raw.trim_start().starts_with(flowchart::LAYOUT_COMMENT) {
+            continue;
+        }
+        out.push_str(raw);
+    }
+    if offsets.is_empty() {
+        return Ok(out);
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let items: Vec<String> = offsets.iter().filter(|(_, v)| v.0.abs() >= 0.5 || v.1.abs() >= 0.5).map(|(k, v)| format!("{k}={:.0},{:.0}", v.0, v.1)).collect();
+    if items.is_empty() {
+        return Ok(out);
+    }
+    out.push_str(&format!("{} {}\n", flowchart::LAYOUT_COMMENT, items.join(" ")));
+    Ok(out)
+}

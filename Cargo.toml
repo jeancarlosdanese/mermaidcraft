@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [".", "crates/engine", "crates/cli"]
+default-members = [".", "crates/engine", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+mermaidcraft-engine = { path = "crates/engine" }
+serde_json = "1"
+ttf-parser = "0.25"
+resvg = { version = "0.45", default-features = false, features = ["text"] }
+svg2pdf = { version = "0.13", default-features = false, features = ["image", "text"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.36"
+rfd = "0.17"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+unreachable = "deny"
+# Style lints that would only force noisier code here.
+collapsible_if = "allow"
+too_many_arguments = "allow"
+needless_late_init = "allow"
+explicit_counter_loop = "allow"
+manual_isolate_lowest_one = "allow"
+chunks_exact_to_as_chunks = "allow"
+type_complexity = "allow"
+
+[package]
+name = "mermaidcraft"
+description = "MermaidCraft: native Mermaid diagram editor (egui shell over the MermaidCraft engine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "mermaidcraft"
+
+[[bin]]
+name = "mermaidcraft"
+path = "src/main.rs"
+
+[dependencies]
+mermaidcraft-engine.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fmv-macos-events = "=0.1.0"
+winit = { version = "0.30", default-features = false }
+
+[lints]
+workspace = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4

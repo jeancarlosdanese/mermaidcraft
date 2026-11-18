@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: package.sh substitutes @VERSION@ and @BUILD_SHA@. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>pt-BR</string></array>
+  <key>CFBundleDisplayName</key><string>MermaidCraft</string>
+  <key>CFBundleName</key><string>MermaidCraft</string>
+  <key>CFBundleExecutable</key><string>MermaidCraft</string>
+  <key>CFBundleIdentifier</key><string>ai.storyteller.mermaidcraft</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleSignature</key><string>????</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>MermaidCraftVersion</key><string>@VERSION@</string>
+  <key>MermaidCraftBuildCommit</key><string>@BUILD_SHA@</string>
+  <key>CFBundleIconFile</key><string>MermaidCraft</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 MermaidCraft contributors. MIT OR Apache-2.0.</string>
+
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>ai.storyteller.mermaidcraft.diagram</string>
+      <key>UTTypeDescription</key><string>Mermaid Diagram</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.plain-text</string><string>public.text</string></array>
+      <key>UTTypeIconFile</key><string>MermaidCraft</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array><string>mmd</string><string>mermaid</string></array>
+        <key>public.mime-type</key>
+        <array><string>text/vnd.mermaid</string></array>
+      </dict>
+    </dict>
+  </array>
+
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Mermaid Diagram</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Owner</string>
+      <key>CFBundleTypeIconFile</key><string>MermaidCraft</string>
+      <key>LSItemContentTypes</key>
+      <array><string>ai.storyteller.mermaidcraft.diagram</string></array>
+    </dict>
+    <dict>
+      <!-- Markdown: opens the ```mermaid blocks; other apps stay the default. -->
+      <key>CFBundleTypeName</key><string>Markdown Document</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>net.daringfireball.markdown</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>
