@@ -109,3 +109,17 @@ Revisor independente. Corrigidos:
 - Revisão independente: a primeira versão tinha uma segunda rotina de limpeza do `;` (trocada pela
   que já existia), media o painel no quadro em que ele ainda era só estimado e deslizava aos trancos
   enquanto se digitava um id no texto. Corrigidos.
+
+## Correções da 0.6.2
+
+- **Arrastar com Shift não ligava nada.** Ao soltar, a conferência de "mover nó" esvaziava o
+  arraste antes da conferência de "ligar", e a ligação se perdia: arrastar com Shift (ou com a
+  ferramenta Ligar) de um nó a outro, ou a um espaço vazio para criar um nó ligado, não fazia nada.
+  Vinha da 0.4.0.
+- **Duplo clique ao lado do painel.** Na 0.6.1, o primeiro clique num nó perto do painel de estilo
+  fazia a vista deslizar antes do segundo clique, e o duplo clique não abria o rótulo. A vista agora
+  espera passar o tempo de um duplo clique (e o botão ser solto) antes de deslizar.
+- **Testes de gestos.** `src/app.rs` ganhou testes que rodam o app quadro a quadro, sem janela, com
+  cliques e arrastes sintéticos: selecionar, ligar pela ferramenta, ligar arrastando com Shift (a
+  outro nó e ao vazio), mover um nó, duplo clique para editar o rótulo e "+ Nó" seguido de
+  digitação. Os testes partem das preferências padrão, nunca do `settings.txt` de quem roda.
