@@ -19,8 +19,8 @@ pub fn command_list() -> Value {
     json!([
         {"name": "info", "usage": "info <file|-> [--block N] [--detail]", "description": "Diagram type, node and edge counts, errors and warnings, as JSON."},
         {"name": "check", "usage": "check <file|-> [--block N] [--json]", "description": "Validate the syntax. Exit code 1 when there are errors."},
-        {"name": "render", "usage": "render <file|-> -o <out.svg|png|pdf> [--format svg|png|pdf] [--scale 1|2|3] [--look sketch|clean] [--font F] [--colors C] [--fill F] [--stroke S] [--arrows A] [--block N]", "description": "Draw the diagram to SVG, PNG or PDF. Fonts: shantell (default), patrick-hand, kalam, architects-daughter, liberation. Colors: group (default), shape, neutral, per-node, classic. Fill: solid (default), hachure, cross-hatch. Stroke: clean, artist (default), cartoonist. Arrows: graphite (default), source."},
-        {"name": "convert", "usage": "convert <in> <out> [--scale N] [--block N]", "description": "Convert between .mmd, .md (one block), .svg, .png and .pdf by file extension."},
+        {"name": "render", "usage": "render <file|-> -o <out.svg|png|pdf> [--format svg|png|pdf] [--scale 1|2|3] [--look sketch|clean] [--font F] [--colors C] [--fill F] [--stroke S] [--arrows A] [--block N]", "description": "Draw the diagram to SVG, PNG or PDF. Without --look, the look saved in the MermaidCraft app is used; the options below change one part of it. Fonts: shantell (default), patrick-hand, kalam, architects-daughter, liberation. Colors: group (default), shape, neutral, per-node, classic. Fill: solid (default), hachure, cross-hatch. Stroke: clean, artist (default), cartoonist. Arrows: graphite (default), source."},
+        {"name": "convert", "usage": "convert <in> <out> [--scale N] [--block N] [--look sketch|clean] [--font F] [--colors C] [--fill F] [--stroke S] [--arrows A]", "description": "Convert between .mmd, .md (one block), .svg, .png and .pdf by file extension. Drawings follow the same look as render."},
         {"name": "new", "usage": "new <flowchart|sequence|er> [-o file.mmd]", "description": "Write a starter diagram."},
         {"name": "commands", "usage": "commands", "description": "List the commands and the MCP tools, as JSON."},
         {"name": "mcp", "usage": "mcp", "description": "Run the MCP server on stdio (tools to create, read, validate, edit and render diagrams)."}
@@ -174,7 +174,8 @@ pub fn look_from_name(name: &str) -> Result<engine::RenderOptions, String> {
     }
 }
 
-/// Look choices given by name; each one left out keeps the value of the base `look`.
+/// Look choices given by name; each one left out keeps the value of the base: the `look` named,
+/// or else the look saved in the app's preferences.
 #[derive(Clone, Debug, Default)]
 pub struct LookArgs {
     pub look: Option<String>,
@@ -188,7 +189,10 @@ pub struct LookArgs {
 impl LookArgs {
     pub fn options(&self) -> Result<engine::RenderOptions, String> {
         use engine::look::{Arrows, ColorMode, Fill, Font, Stroke};
-        let mut o = look_from_name(self.look.as_deref().unwrap_or("sketch"))?;
+        let mut o = match self.look.as_deref() {
+            Some(name) => look_from_name(name)?,
+            None => engine::prefs::look(),
+        };
         if let Some(v) = &self.font {
             o.font = Font::from_id(v).ok_or_else(|| format!("unknown font '{v}': use {}", Font::ids()))?;
         }
@@ -285,11 +289,13 @@ Commands:
                            --colors group|shape|neutral|per-node|classic
                            --fill solid|hachure|cross-hatch  --stroke clean|artist|cartoonist
                            --arrows graphite|source
-  convert <in> <out> convert by extension (.mmd .md .svg .png .pdf)
+  convert <in> <out> convert by extension (.mmd .md .svg .png .pdf); takes the look options too
   new <type>         write a starter diagram (flowchart, sequence, er) [-o file]
   commands           list commands and MCP tools as JSON
   mcp                run the MCP server on stdio
 
+Without --look, render uses the look saved in MermaidCraft (View > Appearance); the options above
+change one part of it. MERMAIDCRAFT_SETTINGS names another preferences file.
 A Markdown file is read through its ```mermaid blocks: pick one with --block N.
 Supported diagrams: flowchart/graph, sequenceDiagram, erDiagram.";
 

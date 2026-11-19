@@ -1,10 +1,7 @@
 //! Tiny settings file (language, theme and diagram look) in the user's application support
 //! folder.
 
-use std::path::PathBuf;
-
-use mermaidcraft_engine::RenderOptions;
-use mermaidcraft_engine::look::{Arrows, ColorMode, Fill, Font, Stroke};
+use mermaidcraft_engine::{RenderOptions, prefs};
 
 use crate::i18n::Lang;
 
@@ -22,60 +19,26 @@ impl Settings {
     }
 }
 
-fn path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let mut p = PathBuf::from(home);
-    if cfg!(target_os = "macos") {
-        p.push("Library/Application Support/MermaidCraft");
-    } else {
-        p.push(".config/mermaidcraft");
-    }
-    p.push("settings.txt");
-    Some(p)
-}
-
 impl Settings {
     pub fn load() -> Self {
         let mut s = Settings::fresh();
-        if let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) {
-            for line in text.lines() {
-                match line.split_once('=') {
-                    Some(("lang", "pt")) => s.lang = Lang::Pt,
-                    Some(("lang", "en")) => s.lang = Lang::En,
-                    Some(("dark", v)) => s.dark = v == "1",
-                    // Files from before the look options: keep a plain look for whoever chose it.
-                    Some(("sketch", "0")) => s.look.stroke = Stroke::Clean,
-                    Some(("colorful", "0")) => s.look.colors = ColorMode::Classic,
-                    Some(("font", v)) => s.look.font = Font::from_id(v).unwrap_or(s.look.font),
-                    Some(("colors", v)) => s.look.colors = ColorMode::from_id(v).unwrap_or(s.look.colors),
-                    Some(("fill", v)) => s.look.fill = Fill::from_id(v).unwrap_or(s.look.fill),
-                    Some(("stroke", v)) => s.look.stroke = Stroke::from_id(v).unwrap_or(s.look.stroke),
-                    Some(("arrows", v)) => s.look.arrows = Arrows::from_id(v).unwrap_or(s.look.arrows),
-                    _ => {}
-                }
+        for (k, v) in prefs::read() {
+            match (k.as_str(), v.as_str()) {
+                ("lang", "pt") => s.lang = Lang::Pt,
+                ("lang", "en") => s.lang = Lang::En,
+                ("dark", v) => s.dark = v == "1",
+                (k, v) => prefs::apply(&mut s.look, k, v),
             }
         }
         s
     }
 
     pub fn save(&self) {
-        let Some(p) = path() else { return };
+        let Some(p) = prefs::path() else { return };
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let lang = if self.lang == Lang::Pt { "pt" } else { "en" };
-        let l = &self.look;
-        let _ = std::fs::write(
-            p,
-            format!(
-                "lang={lang}\ndark={}\nfont={}\ncolors={}\nfill={}\nstroke={}\narrows={}\n",
-                u8::from(self.dark),
-                l.font.id(),
-                l.colors.id(),
-                l.fill.id(),
-                l.stroke.id(),
-                l.arrows.id()
-            ),
-        );
+        let _ = std::fs::write(p, format!("lang={lang}\ndark={}\n{}", u8::from(self.dark), prefs::look_lines(&self.look)));
     }
 }

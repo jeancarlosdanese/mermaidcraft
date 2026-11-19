@@ -321,3 +321,110 @@ fn arrows_option_reaches_er_edges() {
     let source = render_source_with(src, &RenderOptions { arrows: Arrows::Source, ..RenderOptions::default() }).unwrap().0.to_svg();
     assert_ne!(graphite, source);
 }
+
+const LONG_FLOW: &str = include_str!("fixtures/fluxo-longo.mmd");
+
+#[test]
+fn long_labels_wrap() {
+    let (s, _) = render_source(LONG_FLOW).unwrap();
+    let f = flow(LONG_FLOW);
+    for (n, b) in f.nodes.iter().zip(&s.node_boxes) {
+        let max = if n.shape == NodeShape::Diamond { 360.0 } else { 300.0 };
+        assert!(b.w <= max, "{} is {} wide", n.id, b.w);
+    }
+    // Explicit breaks stay.
+    let (s, _) = render_source("flowchart TD\n  A[um<br>dois]\n").unwrap();
+    assert!(s.to_svg().matches("<text").count() >= 2);
+}
+
+#[test]
+fn edges_do_not_cross_other_nodes() {
+    let f = flow(LONG_FLOW);
+    let (s, _) = render_source(LONG_FLOW).unwrap();
+    let index = |id: &str| f.nodes.iter().position(|n| n.id == id);
+    for (ei, e) in f.edges.iter().enumerate() {
+        let ends = [index(&e.from), index(&e.to)];
+        for (ni, (n, b)) in f.nodes.iter().zip(&s.node_boxes).enumerate() {
+            if ends.contains(&Some(ni)) {
+                continue;
+            }
+            let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+            let inside = |p: &(f32, f32)| {
+                let (dx, dy) = ((p.0 - cx).abs(), (p.1 - cy).abs());
+                if n.shape == NodeShape::Diamond { dx / (b.w / 2.0) + dy / (b.h / 2.0) < 0.95 } else { dx < b.w / 2.0 - 2.0 && dy < b.h / 2.0 - 2.0 }
+            };
+            // Points every 2 px along the path, so straight stretches are checked too.
+            let path = s.edge_paths.get(ei).unwrap();
+            let dense: Vec<(f32, f32)> = path
+                .windows(2)
+                .flat_map(|w| {
+                    let (a, b) = (w[0], w[1]);
+                    let steps = ((b.0 - a.0).hypot(b.1 - a.1) / 2.0).ceil().max(1.0) as usize;
+                    (0..=steps).map(move |k| {
+                        let t = k as f32 / steps as f32;
+                        (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+                    })
+                })
+                .collect();
+            assert!(!dense.iter().any(inside), "edge {} -> {} crosses {}", e.from, e.to, n.id);
+        }
+    }
+}
+
+#[test]
+fn edges_into_one_side_get_their_own_ports() {
+    // Three edges converge on the top of D: each gets its own spot and comes in straight.
+    let (s, _) = render_source("flowchart TD\n  A --> D\n  B --> D\n  C --> D\n").unwrap();
+    let ends: Vec<(f32, f32)> = s.edge_paths.iter().map(|p| *p.last().unwrap()).collect();
+    for (i, a) in ends.iter().enumerate() {
+        for b in ends.iter().skip(i + 1) {
+            assert!((a.0 - b.0).abs() > 8.0, "ends too close: {a:?} {b:?}");
+        }
+    }
+    for p in &s.edge_paths {
+        let (q, r) = (p[p.len() - 2], p[p.len() - 1]);
+        assert!((r.0 - q.0).abs() < 0.3 * (r.1 - q.1).abs(), "comes in slanted: {q:?} -> {r:?}");
+    }
+}
+
+#[test]
+fn invisible_edges_leave_ports_alone() {
+    // Off a shared port the edge runs straight from centre to centre; a port would bend it.
+    let off_line = |src: &str| {
+        let s = render_source(src).unwrap().0;
+        let c = |i: usize| (s.node_boxes[i].x + s.node_boxes[i].w / 2.0, s.node_boxes[i].y + s.node_boxes[i].h / 2.0);
+        let (a, b, p) = (c(0), c(1), s.edge_paths[0][0]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        ((p.0 - a.0) * dy - (p.1 - a.1) * dx).abs() / dx.hypot(dy)
+    };
+    assert!(off_line("flowchart TD\n  A --> B\n  A --> C\n") > 2.0, "two visible edges should share the side");
+    assert!(off_line("flowchart TD\n  A --> B\n  A ~~~ C\n") < 1.0, "the hidden edge moved the visible one");
+}
+
+#[test]
+fn straight_edge_label_sits_in_the_middle() {
+    let src = "flowchart TD\n  subgraph S1[Um]\n    A\n  end\n  subgraph S2[Dois]\n    B\n  end\n  A -- envia pedido --> B\n";
+    let (s, _) = render_source(src).unwrap();
+    let path = &s.edge_paths[0];
+    let (a, b) = (path[0], *path.last().unwrap());
+    let svg = s.to_svg();
+    // The label text is drawn between the two ends, away from both.
+    let ys: Vec<f32> = svg.match_indices(">envia pedido<").filter_map(|(i, _)| {
+        let head = &svg[..i];
+        let tag = &head[head.rfind("<text")?..];
+        let y = tag.split(" y=\"").nth(1)?.split('"').next()?;
+        y.parse().ok()
+    }).collect();
+    assert_eq!(ys.len(), 1, "label not found");
+    let lo = a.1.min(b.1) + 12.0;
+    let hi = a.1.max(b.1) - 12.0;
+    assert!(ys[0] > lo && ys[0] < hi, "label at {} not between {lo} and {hi}", ys[0]);
+}
+
+#[test]
+fn oversized_png_is_refused_before_drawing() {
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"90000\" height=\"20\" viewBox=\"0 0 90000 20\"></svg>";
+    assert!(export::svg_to_png(svg, 1.0).is_err());
+    let small = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" viewBox=\"0 0 20 20\"></svg>";
+    assert!(export::svg_to_png(small, 1.0).is_ok());
+}

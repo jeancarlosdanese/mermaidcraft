@@ -12,6 +12,7 @@ pub mod layout;
 pub mod look;
 pub mod markdown;
 pub mod model;
+pub mod prefs;
 pub mod scene;
 pub mod seq_render;
 pub mod sketch;

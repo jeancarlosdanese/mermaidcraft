@@ -7,7 +7,7 @@ use crate::layout::{LEdge, LItem, LayoutResult, Spacing, layered};
 use crate::look::{self, ColorMode, Font};
 use crate::model::*;
 use crate::scene::*;
-use crate::text::{label_size, split_lines};
+use crate::text::{label_size, split_lines, wrap};
 
 const FONT: f32 = 15.0;
 const LABEL_FONT: f32 = 13.5;
@@ -81,8 +81,20 @@ fn resolve_style(fc: &Flowchart, n: &FlowNode, base: Option<(Color, Color)>) -> 
     st
 }
 
-fn node_size(n: &FlowNode, font: Font) -> (f32, f32) {
-    let (tw, th) = label_size(&n.label, FONT, false, font);
+/// Widest line of a node label before it wraps, by shape.
+fn max_label_width(shape: NodeShape) -> f32 {
+    match shape {
+        NodeShape::Diamond => 150.0,
+        NodeShape::Circle | NodeShape::DoubleCircle => 120.0,
+        _ => 220.0,
+    }
+}
+
+/// Widest line of an edge label before it wraps.
+const EDGE_LABEL_WIDTH: f32 = 150.0;
+
+fn node_size(n: &FlowNode, label: &str, font: Font) -> (f32, f32) {
+    let (tw, th) = label_size(label, FONT, false, font);
     let (tw, th) = (tw.max(8.0), th.max(FONT * 1.25));
     let (w, h) = match n.shape {
         NodeShape::Rect | NodeShape::Round => (tw + 32.0, th + 22.0),
@@ -132,7 +144,7 @@ fn arc_top(x: f32, w: f32, cy: f32, ry: f32, up: bool) -> PathCmd {
     PathCmd::Cubic(x, cy + k, x + w, cy + k, x + w, cy)
 }
 
-fn draw_node(scene: &mut Scene, idx: usize, n: &FlowNode, c: P, size: (f32, f32), st: &NodeStyle) {
+fn draw_node(scene: &mut Scene, idx: usize, n: &FlowNode, label: &str, c: P, size: (f32, f32), st: &NodeStyle) {
     let (w, h) = size;
     let (x, y) = (c.0 - w / 2.0, c.1 - h / 2.0);
     let tag = Tag::Node(idx);
@@ -186,7 +198,7 @@ fn draw_node(scene: &mut Scene, idx: usize, n: &FlowNode, c: P, size: (f32, f32)
         NodeShape::TrapezoidAlt => scene.push(base(PrimShape::Polygon(vec![(x, y), (x + w, y), (x + w - s, y + h), (x + s, y + h)]))),
         NodeShape::Asymmetric => scene.push(base(PrimShape::Polygon(vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x + s * 0.8, c.1)]))),
     }
-    push_text_lines(scene, c.0, c.1, &n.label, FONT, st.text, false, Anchor::Middle, tag);
+    push_text_lines(scene, c.0, c.1, label, FONT, st.text, false, Anchor::Middle, tag);
 }
 
 struct Level {
@@ -282,12 +294,67 @@ fn cluster_colors(mode: ColorMode, s: usize) -> (Color, Color, bool, Color) {
     }
 }
 
+/// Is `p` within `tol` of the polyline?
+fn near_path(path: &[P], p: P, tol: f32) -> bool {
+    path.windows(2).any(|w| match w {
+        [a, b] => dist_to_segment(p, *a, *b) <= tol,
+        _ => false,
+    })
+}
+
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+fn contains(outer: &Rect, inner: &Rect) -> bool {
+    inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h
+}
+
+/// The point at fraction `f` of the length of a polyline.
+fn point_along(path: &[P], f: f32) -> Option<P> {
+    let total: f32 = path.windows(2).map(|w| match w {
+        [a, b] => len(sub(*b, *a)),
+        _ => 0.0,
+    }).sum();
+    let mut left = total * f.clamp(0.0, 1.0);
+    for w in path.windows(2) {
+        if let [a, b] = w {
+            let l = len(sub(*b, *a));
+            if left <= l && l > 1e-6 {
+                return Some(add(*a, scale(sub(*b, *a), left / l)));
+            }
+            left -= l;
+        }
+    }
+    path.last().copied()
+}
+
+/// Where an edge label of `size` goes: the layout's spot if it is still on the path, else the
+/// point along the path closest to its middle that touches no node, frame border or placed label.
+fn place_label(path: &[P], hint: Option<P>, size: (f32, f32), nodes: &[Rect], frames: &[Rect], placed: &[Rect]) -> Option<P> {
+    let (w, h) = (size.0 + 10.0, size.1 + 6.0);
+    let rect_at = |p: P| Rect { x: p.0 - w / 2.0, y: p.1 - h / 2.0, w, h };
+    let free = |r: &Rect| {
+        !nodes.iter().any(|n| overlaps(r, n)) && !placed.iter().any(|q| overlaps(r, q)) && !frames.iter().any(|f| overlaps(r, f) && !contains(f, r))
+    };
+    let mut candidates: Vec<P> = hint.into_iter().collect();
+    for f in [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82] {
+        if let Some(p) = point_along(path, f) {
+            candidates.push(p);
+        }
+    }
+    candidates.iter().copied().find(|p| free(&rect_at(*p))).or_else(|| candidates.first().copied())
+}
+
 pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     let t = &DEFAULT_THEME;
     let nn = fc.nodes.len();
     let ns = fc.subgraphs.len();
     let font = opts.font;
-    let node_sizes: Vec<(f32, f32)> = fc.nodes.iter().map(|n| node_size(n, font)).collect();
+    // Labels wrapped to the width of their shape, and edge labels to theirs.
+    let node_labels: Vec<String> = fc.nodes.iter().map(|n| wrap(&n.label, FONT, false, font, max_label_width(n.shape))).collect();
+    let edge_labels: Vec<Option<String>> = fc.edges.iter().map(|e| e.label.as_deref().filter(|l| !l.is_empty()).map(|l| wrap(l, LABEL_FONT, false, font, EDGE_LABEL_WIDTH))).collect();
+    let node_sizes: Vec<(f32, f32)> = fc.nodes.iter().zip(&node_labels).map(|(n, l)| node_size(n, l, font)).collect();
 
     // Levels: 0 is the root, c + 1 is subgraph c.
     let mut members: Vec<Vec<Item>> = vec![Vec::new(); ns + 1];
@@ -373,7 +440,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         let mut flow_idx = Vec::new();
         for (ei, a, b) in level_edges.get(lvl).map(Vec::as_slice).unwrap_or(&[]) {
             let (Some(ia), Some(ib)) = (index.get(a), index.get(b)) else { continue };
-            let label = fc.edges.get(*ei).and_then(|e| e.label.as_ref()).filter(|l| !l.is_empty()).map(|l| {
+            let label = edge_labels.get(*ei).and_then(Option::as_ref).map(|l| {
                 let (w, h) = label_size(l, LABEL_FONT, false, font);
                 (w + 12.0, h + 8.0)
             });
@@ -546,14 +613,107 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         }
     };
     scene.edge_paths = vec![Vec::new(); fc.edges.len()];
+    let node_rects: Vec<Rect> = scene.node_boxes.clone();
+    let cluster_rects: Vec<Rect> = sub_box.clone();
+    // Is node `n` the end `it` of an edge, or inside it when the end is a frame?
+    let within = |n: usize, it: Item| -> bool {
+        match it {
+            Item::Node(m) => m == n,
+            Item::Sub(s) => path_of(fc, Item::Node(n)).contains(&Item::Sub(s)),
+        }
+    };
+
+    // 1. Routes from centre to centre through the layout points, bent around the nodes in between.
+    let mut routes: Vec<Option<Vec<P>>> = vec![None; fc.edges.len()];
+    let mut label_hint: Vec<Option<P>> = vec![None; fc.edges.len()];
+    let mut raw_routes: Vec<Option<(Item, Item, Vec<P>)>> = vec![None; fc.edges.len()];
+    for (ei, e) in fc.edges.iter().enumerate() {
+        let (Some(a), Some(b)) = (endpoint(fc, &e.from), endpoint(fc, &e.to)) else { continue };
+        if a == b {
+            continue;
+        }
+        // An edge between nodes of different groups was laid out between the group frames; its
+        // points follow the frames, not the nodes, so it is drawn straight and bent around what
+        // lies in between instead.
+        let between_frames = level_edges.iter().flatten().any(|(k, ia, ib)| *k == ei && (*ia != a || *ib != b));
+        let mut interior: Vec<P> = Vec::new();
+        if let (Some((lvl, k)), false) = (local.get(&ei), item_moved(a) || item_moved(b) || between_frames) {
+            if let Some(Some(l)) = levels.get(*lvl) {
+                interior = l.layout.edge_points.get(*k).map(|v| v.iter().map(|p| (p.0 + l.origin.0, p.1 + l.origin.1)).collect()).unwrap_or_default();
+                if let Some(slot) = label_hint.get_mut(ei) {
+                    *slot = l.layout.label_pos.get(*k).copied().flatten().map(|p| (p.0 + l.origin.0, p.1 + l.origin.1));
+                }
+            }
+        }
+        let mut pts = vec![center_of(a).0];
+        pts.extend(interior);
+        pts.push(center_of(b).0);
+        if let Some(slot) = raw_routes.get_mut(ei) {
+            *slot = Some((a, b, pts));
+        }
+    }
+    // Every edge as laid out, with its bounds, to keep detours from crossing the others.
+    let visible = |k: usize| fc.edges.get(k).is_some_and(|e| e.kind.style != LineStyle::Invisible);
+    let laid_out: Vec<Option<(Rect, &[P])>> = raw_routes.iter().enumerate().map(|(k, r)| r.as_ref().filter(|_| visible(k)).map(|r| (bounds_of(&r.2), r.2.as_slice()))).collect();
+    for (ei, raw) in raw_routes.iter().enumerate() {
+        let Some((a, b, pts)) = raw else { continue };
+        let (a, b, mut pts) = (*a, *b, pts.clone());
+        let others: Vec<(Rect, &[P])> = laid_out.iter().enumerate().filter(|(k, _)| *k != ei).filter_map(|(_, r)| *r).collect();
+        let mut obstacles: Vec<Obstacle> = node_rects.iter().enumerate().filter(|(n, _)| !within(*n, a) && !within(*n, b)).map(|(n, r)| Obstacle { rect: *r, outline: outline_of(fc.nodes.get(n).map_or(NodeShape::Rect, |x| x.shape)) }).collect();
+        // Frames that hold neither end are in the way too.
+        let holds = |sg: usize, it: Item| it == Item::Sub(sg) || path_of(fc, it).contains(&Item::Sub(sg));
+        obstacles.extend(cluster_rects.iter().enumerate().filter(|(sg, _)| !holds(*sg, a) && !holds(*sg, b)).map(|(_, r)| Obstacle { rect: *r, outline: Outline::Box }));
+        avoid_boxes(&mut pts, &obstacles, 14.0, &others);
+        if let Some(slot) = routes.get_mut(ei) {
+            *slot = Some(pts);
+        }
+    }
+
+    // 2. Ports: edges that meet a node on the same side are spread along that side, in the order
+    // they arrive, so their ends and heads do not pile up.
+    let mut groups: HashMap<(usize, Side), Vec<(usize, bool, f32)>> = HashMap::new();
+    for (ei, route) in routes.iter().enumerate() {
+        let (Some(pts), Some(e)) = (route, fc.edges.get(ei)) else { continue };
+        // Invisible edges only shape the layout; they take no port.
+        if e.kind.style == LineStyle::Invisible {
+            continue;
+        }
+        let (Some(a), Some(b)) = (endpoint(fc, &e.from), endpoint(fc, &e.to)) else { continue };
+        for (is_end, it, next) in [(false, a, pts.get(1)), (true, b, pts.get(pts.len().saturating_sub(2)))] {
+            let (Item::Node(n), Some(&next)) = (it, next) else { continue };
+            let (c, w, h, _) = center_of(it);
+            let side = side_toward(c, w, h, next);
+            let coord = if matches!(side, Side::Top | Side::Bottom) { next.0 } else { next.1 };
+            groups.entry((n, side)).or_default().push((ei, is_end, coord));
+        }
+    }
+    let mut ports: HashMap<(usize, bool), (Side, f32)> = HashMap::new();
+    for ((n, side), mut list) in groups {
+        if list.len() < 2 {
+            continue;
+        }
+        list.sort_by(|x, y| x.2.total_cmp(&y.2).then(x.0.cmp(&y.0)));
+        let (_, w, h, outline) = center_of(Item::Node(n));
+        let length = if matches!(side, Side::Top | Side::Bottom) { w } else { h };
+        let span = length * if matches!(outline, Outline::Diamond) { 0.4 } else { 0.6 };
+        let k = list.len() as f32;
+        for (i, (ei, is_end, _)) in list.iter().enumerate() {
+            ports.insert((*ei, *is_end), (side, span * ((i as f32 + 0.5) / k - 0.5)));
+        }
+    }
+
+    // 3. Drawing, with each label placed where it touches no node, frame border or other label.
     let mut label_prims: Vec<Prim> = Vec::new();
+    let mut placed: Vec<Rect> = Vec::new();
     for (ei, e) in fc.edges.iter().enumerate() {
         let (Some(a), Some(b)) = (endpoint(fc, &e.from), endpoint(fc, &e.to)) else { continue };
         let (ca, wa, ha, oa) = center_of(a);
         let (cb, wb, hb, ob) = center_of(b);
         let tag = Tag::Edge(ei);
+        // The arrow takes the final outline colour of its node, `style` and `classDef` included.
         let source = match a {
-            Item::Node(n) => node_base(fc, n, opts.colors).map_or(t.line, |c| c.1),
+            // A see-through outline would make the arrow vanish: fall back to the line colour.
+            Item::Node(n) => fc.nodes.get(n).map(|node| resolve_style(fc, node, node_base(fc, n, opts.colors)).stroke).filter(|c| c[3] >= 128).unwrap_or(t.line),
             Item::Sub(sg) => cluster_colors(opts.colors, sg).3,
         };
         let ecol = look::edge_color(opts, t.line, source);
@@ -563,15 +723,16 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             LineStyle::Thick => 3.5,
             _ => 1.8,
         };
+        let label = edge_labels.get(ei).and_then(Option::as_ref);
         let mut label_at: Option<P> = None;
-        let pts: Vec<P> = if a == b {
+        if a == b {
             // Self loop on the right side.
             let r = ca.0 + wa / 2.0;
             let top = ca.1 - ha / 4.0;
             let bot = ca.1 + ha / 4.0;
             let cmds = vec![PathCmd::Move(r, top), PathCmd::Cubic(r + 38.0, top - 16.0, r + 38.0, bot + 16.0, r - 1.0, bot)];
             let sampled = sample(&cmds);
-            label_at = Some((r + 40.0 + label_size(e.label.as_deref().unwrap_or(""), LABEL_FONT, false, font).0 / 2.0, ca.1));
+            label_at = Some((r + 40.0 + label_size(label.map_or("", String::as_str), LABEL_FONT, false, font).0 / 2.0, ca.1));
             if e.kind.style != LineStyle::Invisible {
                 let mut p = Prim::new(PrimShape::Path(cmds)).stroke(ecol, width).tag(tag);
                 if e.kind.style == LineStyle::Dotted {
@@ -585,31 +746,41 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             if let Some(slot) = scene.edge_paths.get_mut(ei) {
                 *slot = sampled;
             }
-            Vec::new()
-        } else {
-            let mut interior: Vec<P> = Vec::new();
-            if let (Some((lvl, k)), false) = (local.get(&ei), item_moved(a) || item_moved(b)) {
-                if let Some(Some(l)) = levels.get(*lvl) {
-                    interior = l.layout.edge_points.get(*k).map(|v| v.iter().map(|p| (p.0 + l.origin.0, p.1 + l.origin.1)).collect()).unwrap_or_default();
-                    label_at = l.layout.label_pos.get(*k).copied().flatten().map(|p| (p.0 + l.origin.0, p.1 + l.origin.1));
-                }
-            }
-            let mut pts = vec![ca];
-            pts.extend(interior);
-            pts.push(cb);
+        } else if let Some(Some(raw)) = routes.get(ei) {
+            let mut pts = raw.clone();
             let first_toward = pts.get(1).copied().unwrap_or(cb);
             let last_toward = pts.get(pts.len().saturating_sub(2)).copied().unwrap_or(ca);
-            let n = pts.len();
-            if let Some(p) = pts.first_mut() {
-                *p = exit_point(oa, ca, wa, ha, first_toward);
+            // Ends: on a spread port (with a short straight stub), or where the line leaves the shape.
+            match ports.get(&(ei, true)) {
+                Some(&(side, off)) => {
+                    let p = border_at(ob, cb, wb, hb, side, off);
+                    let n = pts.len();
+                    if let Some(slot) = pts.get_mut(n - 1) {
+                        *slot = p;
+                    }
+                    pts.insert(n - 1, add(p, scale(side_normal(side), 16.0)));
+                }
+                None => {
+                    let n = pts.len();
+                    if let Some(slot) = pts.get_mut(n - 1) {
+                        *slot = exit_point(ob, cb, wb, hb, last_toward);
+                    }
+                }
             }
-            if let Some(p) = pts.get_mut(n - 1) {
-                *p = exit_point(ob, cb, wb, hb, last_toward);
+            match ports.get(&(ei, false)) {
+                Some(&(side, off)) => {
+                    let p = border_at(oa, ca, wa, ha, side, off);
+                    if let Some(slot) = pts.first_mut() {
+                        *slot = p;
+                    }
+                    pts.insert(1, add(p, scale(side_normal(side), 16.0)));
+                }
+                None => {
+                    if let Some(slot) = pts.first_mut() {
+                        *slot = exit_point(oa, ca, wa, ha, first_toward);
+                    }
+                }
             }
-            pts
-        };
-        if pts.len() >= 2 {
-            let mut pts = pts;
             let n = pts.len();
             let end_dir = norm(sub(pts.get(n - 1).copied().unwrap_or_default(), pts.get(n - 2).copied().unwrap_or_default()));
             let start_dir = norm(sub(pts.first().copied().unwrap_or_default(), pts.get(1).copied().unwrap_or_default()));
@@ -625,8 +796,10 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             }
             let cmds = smooth(&pts);
             let sampled = sample(&cmds);
-            if label_at.is_none() {
-                label_at = sampled.get(sampled.len() / 2).copied();
+            if let Some(l) = label {
+                let size = label_size(l, LABEL_FONT, false, font);
+                let hint = label_hint.get(ei).copied().flatten().filter(|h| near_path(&sampled, *h, 6.0));
+                label_at = place_label(&sampled, hint, size, &node_rects, &cluster_rects, &placed);
             }
             if e.kind.style != LineStyle::Invisible {
                 let mut p = Prim::new(PrimShape::Path(cmds)).stroke(ecol, width).tag(tag);
@@ -645,9 +818,11 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
                 *slot = sampled;
             }
         }
-        if let (Some(label), Some(at)) = (e.label.as_ref().filter(|l| !l.is_empty()), label_at) {
+        if let (Some(label), Some(at)) = (label, label_at) {
             let (tw, th) = label_size(label, LABEL_FONT, false, font);
-            label_prims.push(Prim::new(PrimShape::Rect { x: at.0 - tw / 2.0 - 5.0, y: at.1 - th / 2.0 - 3.0, w: tw + 10.0, h: th + 6.0, r: 3.0 }).fill(if opts.colorful() { [255, 255, 255, 255] } else { t.label_bg }).tag(tag));
+            let rect = Rect { x: at.0 - tw / 2.0 - 5.0, y: at.1 - th / 2.0 - 3.0, w: tw + 10.0, h: th + 6.0 };
+            placed.push(rect);
+            label_prims.push(Prim::new(PrimShape::Rect { x: rect.x, y: rect.y, w: rect.w, h: rect.h, r: 3.0 }).fill(if opts.colorful() { [255, 255, 255, 255] } else { t.label_bg }).tag(tag));
             let mut tmp = Scene::default();
             let label_col = if opts.colorful() { look::GRAPHITE } else { t.text };
             push_text_lines(&mut tmp, at.0, at.1, label, LABEL_FONT, label_col, false, Anchor::Middle, tag);
@@ -660,7 +835,8 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     // Nodes on top of the edge ends.
     for (i, n) in fc.nodes.iter().enumerate() {
         let st = resolve_style(fc, n, node_base(fc, i, opts.colors));
-        draw_node(&mut scene, i, n, node_c.get(i).copied().unwrap_or((0.0, 0.0)), node_sizes.get(i).copied().unwrap_or((50.0, 38.0)), &st);
+        let label = node_labels.get(i).map_or(n.label.as_str(), String::as_str);
+        draw_node(&mut scene, i, n, label, node_c.get(i).copied().unwrap_or((0.0, 0.0)), node_sizes.get(i).copied().unwrap_or((50.0, 38.0)), &st);
     }
     scene.finish(24.0);
     scene
