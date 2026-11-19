@@ -1,6 +1,6 @@
 # FEAT: visual personalizável (estilo esboço)
 
-Estado: implementado, aguardando revisão · 18/11/2026
+Estado: entregue na 0.2.0 (18/11/2026)
 
 ## Objetivo
 

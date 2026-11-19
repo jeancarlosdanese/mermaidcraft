@@ -46,7 +46,7 @@ fn tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "required": ["output_path"], "properties": {
                 "path": {"type": "string"}, "source": {"type": "string"}, "block": {"type": "integer"},
                 "output_path": {"type": "string", "description": "File to write; its extension (.svg, .png, .pdf) picks the format."},
-                "format": {"type": "string", "enum": ["svg", "png", "pdf"]}, "scale": {"type": "number", "description": "PNG scale: 1, 2 or 3."}, "look": {"type": "string", "enum": ["sketch", "clean"], "description": "sketch (default): hand-drawn, colourful; clean: classic Mermaid look. The fields below change one part of it."},
+                "format": {"type": "string", "enum": ["svg", "png", "pdf"]}, "scale": {"type": "number", "description": "PNG scale: 1, 2 or 3."}, "look": {"type": "string", "enum": ["sketch", "clean"], "description": "sketch: hand-drawn, colourful (the default look); clean: classic Mermaid look. Left out, the look saved in the MermaidCraft app is used. The fields below change one part of it."},
                 "font": {"type": "string", "enum": ["shantell", "patrick-hand", "kalam", "architects-daughter", "liberation"]},
                 "colors": {"type": "string", "enum": ["group", "shape", "neutral", "per-node", "classic"], "description": "group: colour of the subgraph; shape: by the role of the shape (decision, start/end, data)."},
                 "fill": {"type": "string", "enum": ["solid", "hachure", "cross-hatch"]},

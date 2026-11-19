@@ -109,3 +109,49 @@ pub fn label_size(label: &str, size: f32, bold: bool, font: Font) -> (f32, f32) 
     let w = lines.iter().map(|l| text_width(l, size, bold, font)).fold(0.0f32, f32::max);
     (w, lines.len() as f32 * size * 1.25)
 }
+
+/// Breaks a label into lines no wider than `max_w`, word by word, keeping explicit line breaks.
+/// A word longer than the line stays whole on its own line.
+pub fn wrap(label: &str, size: f32, bold: bool, font: Font, max_w: f32) -> String {
+    let mut out = String::with_capacity(label.len() + 8);
+    for (i, para) in label.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let mut line = String::new();
+        for word in para.split(' ').filter(|w| !w.is_empty()) {
+            if line.is_empty() {
+                line.push_str(word);
+                continue;
+            }
+            let candidate_w = text_width(&line, size, bold, font) + text_width(" ", size, bold, font) + text_width(word, size, bold, font);
+            if candidate_w <= max_w {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push_str(&line);
+                out.push('\n');
+                line.clear();
+                line.push_str(word);
+            }
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_keeps_words_and_breaks() {
+        let f = Font::Liberation;
+        let w = wrap("IA pausada, fora do horário, saída pedida ou palavra de transbordo?", 15.0, false, f, 150.0);
+        assert!(w.lines().count() >= 3);
+        assert!(w.lines().all(|l| text_width(l, 15.0, false, f) <= 150.0));
+        assert_eq!(w.replace('\n', " "), "IA pausada, fora do horário, saída pedida ou palavra de transbordo?");
+        assert_eq!(wrap("a\nb", 15.0, false, f, 500.0), "a\nb");
+        assert_eq!(wrap("Supercalifragilístico", 15.0, false, f, 20.0), "Supercalifragilístico");
+    }
+}

@@ -1,0 +1,59 @@
+flowchart TD
+  subgraph G1["1. Entrada (canal e registro)"]
+    A([Pessoa envia uma mensagem pelo canal]) --> B[Canal grava contato e mensagem]
+    B --> C[Registro grava conversa e origem da campanha]
+    C --> D{Atendimento pausado, fora do horário, saída pedida ou palavra de encaminhamento?}
+    D -- sim --> D1([Nada é respondido])
+    D -- não --> E[Agrupador: espera alguns segundos e junta as mensagens]
+    E --> F{Limite de chamadas por minuto}
+    F -- estourou --> F1([Turno encerrado])
+  end
+
+  subgraph G2["2. Decisão"]
+    G{Versão da conta}
+    G -- V2 --> H[Seletor: rota, contato, etapa]
+    H --> H1{Etapa manual, sem configuração ou sem confiança?}
+    H1 -- sim --> H2([Encerrado])
+    H1 -- não --> I[Classificador de intenção]
+    G -- V1 --> I
+    I --> J[Verificações de entrada]
+    J --> K[V2: troca de assunto e criação do contato na campanha certa]
+    K --> L[V2: verificador confere as condições e move o cartão]
+    L --> L1{Cartão entrou em etapa manual?}
+    L1 -- sim --> L2[Passagem: última resposta, sem ferramentas]
+  end
+
+  subgraph G3["3. Montagem"]
+    M[Busca na base de conhecimento]
+    M --> N{Compilador}
+    N -- V1 --> N1[Blocos fixos e o texto livre da conta]
+    N -- V2 --> N2[Núcleo da conta e módulo da etapa]
+    N1 --> O[Mais três trechos: dados, regras de escrita, contexto]
+    N2 --> O
+    O --> P[Histórico recente e a mensagem atual]
+  end
+
+  subgraph G4["4. Geração"]
+    Q{Caminho novo ligado?}
+    Q -- não --> Q1[Caminho antigo: modelo fixo, sem verificação de saída]
+    Q -- sim --> R[Modelo com ciclo de ferramentas]
+    R --> S{Verificação de saída}
+    S -- reprova --> S1[Troca a resposta inteira por frase fixa]
+    S -- passa --> T[Tira as citações e grava foco e marcas]
+  end
+
+  subgraph G5["5. Envio"]
+    U[Divide em até três partes] --> V[Relê a pausa antes de cada parte]
+    V --> W([Envia pelo canal])
+  end
+
+  F -- dentro --> G
+  L1 -- não --> M
+  L2 --> M
+  P --> Q
+  Q1 --> U
+  S1 --> U
+  T --> U
+
+  classDef alerta fill:#fde2e2,stroke:#c0392b
+  class C,F,P,Q1,S1,K alerta

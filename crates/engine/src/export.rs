@@ -6,6 +6,12 @@ use resvg::usvg;
 
 /// Largest PNG side, in pixels.
 const MAX_SIDE: f32 = 16_384.0;
+/// Most pixels in one PNG (about 512 MB of image memory).
+const MAX_PIXELS: f32 = 128_000_000.0;
+
+fn too_large(w: f32, h: f32) -> bool {
+    w > MAX_SIDE || h > MAX_SIDE || w * h > MAX_PIXELS
+}
 
 fn fontdb() -> Arc<usvg::fontdb::Database> {
     static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
@@ -27,13 +33,32 @@ fn tree_from(svg: &str) -> Result<usvg::Tree, String> {
     usvg::Tree::from_str(svg, &opt).map_err(|e| format!("could not read the SVG: {e}"))
 }
 
+/// The `width` and `height` written on the root `<svg>` element, when they are plain numbers.
+fn declared_size(svg: &str) -> Option<(f32, f32)> {
+    let start = svg.find("<svg")?;
+    let tag = svg.get(start..)?.split('>').next()?;
+    let attr = |name: &str| -> Option<f32> {
+        let key = format!(" {name}=\"");
+        let from = tag.find(&key)? + key.len();
+        let rest = tag.get(from..)?;
+        rest.get(..rest.find('"')?)?.trim_end_matches("px").trim().parse().ok()
+    };
+    Some((attr("width")?, attr("height")?))
+}
+
 /// Renders SVG text to PNG bytes at the given scale (1.0 = one pixel per SVG unit).
 pub fn svg_to_png(svg: &str, scale: f32) -> Result<Vec<u8>, String> {
-    let tree = tree_from(svg)?;
     let scale = if scale.is_finite() { scale.clamp(0.1, 8.0) } else { 1.0 };
+    // Refuse an image that is too large before reading the whole drawing.
+    if let Some((w, h)) = declared_size(svg) {
+        if too_large(w * scale, h * scale) {
+            return Err("the image would be too large".into());
+        }
+    }
+    let tree = tree_from(svg)?;
     let size = tree.size();
     let (w, h) = (size.width() * scale, size.height() * scale);
-    if w > MAX_SIDE || h > MAX_SIDE {
+    if too_large(w, h) {
         return Err("the image would be too large".into());
     }
     let (pw, ph) = ((w.ceil() as u32).max(1), (h.ceil() as u32).max(1));
@@ -83,4 +108,17 @@ pub fn rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Stri
     let size = resvg::tiny_skia::IntSize::from_wh(width, height).ok_or("bad image size")?;
     let pixmap = resvg::tiny_skia::Pixmap::from_vec(data, size).ok_or("bad image data")?;
     pixmap.encode_png().map_err(|e| format!("could not encode the PNG: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_is_read_from_the_root_tag() {
+        assert_eq!(declared_size("<svg xmlns=\"x\" width=\"733.5\" height=\"20px\">"), Some((733.5, 20.0)));
+        assert_eq!(declared_size("<svg viewBox=\"0 0 1 1\">"), None);
+        assert!(too_large(16_000.0, 16_000.0));
+        assert!(!too_large(8_113.0, 4_595.0));
+    }
 }

@@ -79,6 +79,7 @@ const PT: &[(&str, &str)] = &[
     ("Drag nodes to rearrange them. Click to edit. + Node adds a node; Link (or Shift+drag from one node to another) connects them. The scroll wheel zooms.", "Arraste os nós para reorganizar. Clique para editar. + Nó cria um nó; Ligar (ou Shift+arrastar de um nó a outro) conecta. A roda do mouse dá zoom."),
     ("Visual editing works on flowcharts; edit the text for this diagram type.", "A edição visual funciona em fluxogramas; edite o texto para este tipo de diagrama."),
     ("Click the node to connect to", "Clique no nó de destino"),
+    ("Click a node or an edge to edit it. + Node adds a node; Link (or dragging from one node to another) connects them.", "Clique num nó ou numa seta para editar. + Nó cria um nó; Ligar (ou arrastar de um nó a outro) conecta."),
     ("Problems", "Problemas"),
     ("No problems", "Nenhum problema"),
     ("Line", "Linha"),
