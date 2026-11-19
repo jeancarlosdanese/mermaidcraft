@@ -64,6 +64,12 @@ rfd.workspace = true
 fmv-macos-events = "=0.1.0"
 winit = { version = "0.30", default-features = false }
 
+# Linux: a window needs Wayland or X11. The Wayland library is loaded at run time (no build-time
+# dependency), and GNOME gets a title bar drawn by the app (it has no server-side decorations).
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita"] }
+
 [lints]
 workspace = true
 

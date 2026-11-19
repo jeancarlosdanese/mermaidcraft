@@ -1,5 +1,8 @@
 //! MermaidCraft: native Mermaid diagram editor.
 
+// Windows: the release app opens without a console window (mermaidcraft-cli stays a console app).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod highlight;
 mod i18n;
@@ -47,6 +50,11 @@ fn main() -> eframe::Result<()> {
     let (_guard, events) = platform::listen();
 
     let mut viewport = egui::ViewportBuilder::default().with_title("MermaidCraft").with_inner_size([1280.0, 800.0]).with_min_inner_size([720.0, 480.0]);
+    // Linux: the desktop links the window to ai.storyteller.mermaidcraft.desktop (name and icon).
+    #[cfg(target_os = "linux")]
+    {
+        viewport = viewport.with_app_id("ai.storyteller.mermaidcraft");
+    }
     if let Ok(rgba) = mermaidcraft_engine::export::svg_to_rgba(include_str!("../assets/icon.svg"), 256) {
         viewport = viewport.with_icon(egui::IconData { rgba, width: 256, height: 256 });
     }

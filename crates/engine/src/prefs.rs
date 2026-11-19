@@ -1,5 +1,6 @@
 //! The preferences file shared by the app, the CLI and the MCP server: one `key=value` per line,
-//! in the user's application support folder (`MERMAIDCRAFT_SETTINGS` points elsewhere).
+//! in the user's application folder (`MERMAIDCRAFT_SETTINGS` points elsewhere): Application
+//! Support on macOS, `%APPDATA%` on Windows, `$XDG_CONFIG_HOME` (or `~/.config`) elsewhere.
 
 use std::path::PathBuf;
 
@@ -8,15 +9,29 @@ use crate::look::{Arrows, ColorMode, Fill, Font, Stroke};
 
 /// Where the preferences live.
 pub fn path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("MERMAIDCRAFT_SETTINGS").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
+    path_from(|k| std::env::var_os(k))
+}
+
+/// The preferences path for this system, reading the environment through `env`.
+fn path_from(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let var = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(p) = var("MERMAIDCRAFT_SETTINGS") {
+        return Some(p);
     }
-    let mut p = PathBuf::from(std::env::var_os("HOME")?);
-    if cfg!(target_os = "macos") {
+    let mut p = if cfg!(target_os = "macos") {
+        let mut p = var("HOME")?;
         p.push("Library/Application Support/MermaidCraft");
+        p
+    } else if cfg!(windows) {
+        let mut p = var("APPDATA")?;
+        p.push("MermaidCraft");
+        p
     } else {
-        p.push(".config/mermaidcraft");
-    }
+        // A relative XDG_CONFIG_HOME is ignored, as the XDG specification asks.
+        let mut p = var("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).or_else(|| var("HOME").map(|h| h.join(".config")))?;
+        p.push("mermaidcraft");
+        p
+    };
     p.push("settings.txt");
     Some(p)
 }
@@ -59,6 +74,27 @@ pub fn look_lines(l: &RenderOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_follows_each_system() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| std::ffi::OsString::from(v));
+        let all = env(&[("HOME", "/home/u"), ("APPDATA", "C:/Users/u/AppData/Roaming"), ("XDG_CONFIG_HOME", "/home/u/cfg")]);
+        let p = path_from(all).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(p, PathBuf::from("/home/u/Library/Application Support/MermaidCraft/settings.txt"));
+        } else if cfg!(windows) {
+            assert_eq!(p, PathBuf::from("C:/Users/u/AppData/Roaming").join("MermaidCraft").join("settings.txt"));
+            // Windows has no HOME of its own: APPDATA is what counts.
+            assert_eq!(path_from(env(&[("HOME", "/x")])), None);
+        } else {
+            assert_eq!(p, PathBuf::from("/home/u/cfg/mermaidcraft/settings.txt"));
+            assert_eq!(path_from(env(&[("HOME", "/home/u")])), Some(PathBuf::from("/home/u/.config/mermaidcraft/settings.txt")));
+            assert_eq!(path_from(env(&[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "rel")])), Some(PathBuf::from("/home/u/.config/mermaidcraft/settings.txt")));
+        }
+        // The override wins everywhere; an empty one is ignored.
+        assert_eq!(path_from(env(&[("MERMAIDCRAFT_SETTINGS", "/tmp/s.txt"), ("HOME", "/h")])), Some(PathBuf::from("/tmp/s.txt")));
+        assert_ne!(path_from(env(&[("MERMAIDCRAFT_SETTINGS", ""), ("APPDATA", "/a"), ("HOME", "/h")])), Some(PathBuf::from("")));
+    }
 
     #[test]
     fn look_round_trips_and_old_files_still_read() {
