@@ -83,7 +83,8 @@ pub struct App {
     future: Vec<String>,
     status: Option<(String, f64)>,
     label_buf: String,
-    label_for: Option<Sel>,
+    /// What the label box was being typed for: saved when the box loses focus, however it does.
+    label_editing: Option<Sel>,
     focus_label: bool,
     prompt: Option<After>,
     allow_close: bool,
@@ -93,6 +94,37 @@ pub struct App {
     frames: u32,
     title: String,
     untitled_kind: &'static str,
+    /// Lines of the text changed by the last edit made on the drawing, and when (they light up).
+    flash_lines: Option<(usize, usize, f64)>,
+    /// Selection the text panel last followed, and whether the current one came from the text.
+    last_sel: Sel,
+    sel_from_text: bool,
+    /// Line the text panel must scroll to.
+    scroll_to_line: Option<usize>,
+    /// Place of the text cursor (byte), to select what is named there.
+    cursor_byte: Option<usize>,
+    /// Where the canvas is, for the floating tools, and how tall the tool bar came out.
+    canvas_rect: Option<egui::Rect>,
+    tools_h: f32,
+}
+
+/// Lines of `new` (1-based, inclusive) that differ from `old`; for a pure deletion, the line where
+/// the text was removed.
+fn changed_lines(old: &str, new: &str) -> Option<(usize, usize)> {
+    let o: Vec<&str> = old.lines().collect();
+    let n: Vec<&str> = new.lines().collect();
+    let prefix = o.iter().zip(&n).take_while(|(a, b)| a == b).count();
+    let room = o.len().min(n.len()) - prefix;
+    let suffix = o.iter().rev().zip(n.iter().rev()).take_while(|(a, b)| a == b).count().min(room);
+    let end = n.len() - suffix;
+    if end > prefix {
+        Some((prefix + 1, end))
+    } else if o.len() > n.len() && !n.is_empty() {
+        let at = (prefix + 1).min(n.len());
+        Some((at, at))
+    } else {
+        None
+    }
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
@@ -199,7 +231,7 @@ impl App {
             future: Vec::new(),
             status: None,
             label_buf: String::new(),
-            label_for: None,
+            label_editing: None,
             focus_label: false,
             prompt: None,
             allow_close: false,
@@ -209,6 +241,13 @@ impl App {
             frames: 0,
             title: String::new(),
             untitled_kind: "flowchart",
+            flash_lines: None,
+            last_sel: Sel::None,
+            sel_from_text: false,
+            scroll_to_line: None,
+            cursor_byte: None,
+            canvas_rect: None,
+            tools_h: 40.0,
         };
         let mut opened = false;
         for f in &opts.files {
@@ -220,7 +259,38 @@ impl App {
         if !opened {
             app.set_doc(SAMPLE.to_string(), None, None);
         }
+        // Screenshot mode only: a selection and the dark theme, to check the interface by image.
+        if shot_mode {
+            if let Ok(id) = std::env::var("MERMAIDCRAFT_SHOT_SELECT") {
+                app.sel = Sel::Node(id);
+            }
+            if std::env::var("MERMAIDCRAFT_SHOT_DARK").is_ok_and(|v| v == "1") {
+                app.dark = true;
+            }
+        }
         app
+    }
+
+    /// Line of the text that defines the selected node or edge.
+    fn sel_line(&self) -> Option<usize> {
+        let f = self.flow()?;
+        match &self.sel {
+            // The line that gives the node its shape and label, else its first mention.
+            Sel::Node(id) => f.node_index(id).and_then(|i| f.nodes.get(i)).map(|n| n.def_span.map_or(n.line, |d| 1 + self.text.get(..d.start).unwrap_or("").matches('\n').count())),
+            Sel::Edge(i) => f.edges.get(*i).map(|e| e.line),
+            Sel::None => None,
+        }
+    }
+
+    /// Changes the style of a node through `change`, as one undo step.
+    fn restyle(&mut self, id: &str, change: impl FnOnce(&mut engine::StyleMap), now: f64) {
+        let old = self.flow().map(|f| edit::own_node_style(&self.text, f, id)).unwrap_or_default();
+        let mut map = old.clone();
+        change(&mut map);
+        if map != old {
+            let r = edit::set_node_style(&self.text, id, &map);
+            self.visual(r, now);
+        }
     }
 
     fn tr(&self, s: &'static str) -> &'static str {
@@ -491,6 +561,7 @@ impl App {
         match result {
             Ok(new) => {
                 if new != self.text {
+                    self.flash_lines = changed_lines(&self.text, &new).map(|(a, b)| (a, b, now));
                     self.history.push(std::mem::replace(&mut self.text, new));
                     self.future.clear();
                     if self.history.len() > 200 {
@@ -508,7 +579,8 @@ impl App {
         }
     }
 
-    fn undo(&mut self) {
+    fn undo(&mut self, now: f64) {
+        self.commit_label(false, now);
         if let Some(prev) = self.history.pop() {
             self.future.push(std::mem::replace(&mut self.text, prev));
             self.dirty = true;
@@ -516,7 +588,8 @@ impl App {
         }
     }
 
-    fn redo(&mut self) {
+    fn redo(&mut self, now: f64) {
+        self.commit_label(false, now);
         if let Some(next) = self.future.pop() {
             self.history.push(std::mem::replace(&mut self.text, next));
             self.dirty = true;
@@ -549,6 +622,7 @@ impl App {
     }
 
     fn delete_selected(&mut self, now: f64) {
+        self.commit_label(false, now);
         let r = match &self.sel {
             Sel::Node(id) => edit::remove_node(&self.text, id),
             Sel::Edge(i) => edit::remove_edge(&self.text, *i),
@@ -610,11 +684,11 @@ impl App {
             ui.menu_button(self.tr("Edit"), |ui| {
                 if ui.add_enabled(!self.history.is_empty(), egui::Button::new(self.tr("Undo")).shortcut_text("⌘Z")).clicked() {
                     ui.close();
-                    self.undo();
+                    self.undo(now);
                 }
                 if ui.add_enabled(!self.future.is_empty(), egui::Button::new(self.tr("Redo")).shortcut_text("⇧⌘Z")).clicked() {
                     ui.close();
-                    self.redo();
+                    self.redo(now);
                 }
             });
             ui.menu_button(self.tr("View"), |ui| {
@@ -714,9 +788,9 @@ impl App {
         }
         if !ctx.egui_wants_keyboard_input() {
             if pressed(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
-                self.redo();
+                self.redo(now);
             } else if pressed(ctx, Modifiers::COMMAND, Key::Z) {
-                self.undo();
+                self.undo(now);
             }
             let del = ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace));
             if del && self.flow().is_some() {
@@ -808,6 +882,24 @@ impl App {
                 }
             });
         });
+        // Follow a selection made on the drawing: scroll to its line.
+        if self.sel != self.last_sel {
+            if !self.sel_from_text {
+                self.scroll_to_line = self.sel_line();
+            }
+            self.sel_from_text = false;
+            self.last_sel = self.sel.clone();
+        }
+        let now = ui.input(|i| i.time);
+        let sel_line = self.sel_line();
+        let flash = self.flash_lines.filter(|f| now - f.2 < 1.4);
+        if flash.is_some() {
+            ui.ctx().request_repaint();
+        } else {
+            self.flash_lines = None;
+        }
+        let mut scroll_to = self.scroll_to_line.take();
+        let mut cursor_at: Option<(usize, usize, bool)> = None;
         // Text editor with a line-number gutter.
         let dark = self.dark;
         let font = egui::FontId::monospace(14.0);
@@ -845,17 +937,37 @@ impl App {
                 if out.response.changed() {
                     changed = true;
                 }
+                // The line of the text cursor (to select what is defined there).
+                if let Some(cr) = out.cursor_range {
+                    let idx: usize = cr.primary.index.into();
+                    let byte = self.text.char_indices().nth(idx).map_or(self.text.len(), |(b, _)| b);
+                    let line = 1 + self.text.get(..byte).unwrap_or("").matches('\n').count();
+                    cursor_at = Some((byte, line, out.response.has_focus()));
+                }
                 let painter = ui.painter();
                 let clip = ui.clip_rect();
                 let dim = if dark { Color32::from_gray(120) } else { Color32::from_gray(150) };
                 for (i, row) in out.galley.rows.iter().enumerate() {
                     let rect = row.rect().translate(out.galley_pos.to_vec2());
+                    if scroll_to == Some(i + 1) {
+                        ui.scroll_to_rect(egui::Rect::from_x_y_ranges(gutter.x_range(), rect.y_range()).expand2(Vec2::new(0.0, 40.0)), None);
+                        scroll_to = None;
+                    }
                     if rect.max.y < clip.min.y || rect.min.y > clip.max.y {
                         continue;
                     }
                     let line = i + 1;
                     let err = err_lines.iter().find(|(l, _)| *l == line);
                     let wide = egui::Rect::from_min_max(egui::pos2(gutter.min.x, rect.min.y), egui::pos2(out.response.rect.max.x.max(clip.max.x), rect.max.y));
+                    if sel_line == Some(line) {
+                        painter.rect_filled(wide, 0.0, Color32::from_rgba_unmultiplied(40, 120, 255, if dark { 46 } else { 30 }));
+                    }
+                    if let Some((a, b, t0)) = flash {
+                        if (a..=b).contains(&line) {
+                            let k = (1.0 - ((now - t0) / 1.4) as f32).clamp(0.0, 1.0);
+                            painter.rect_filled(wide, 0.0, Color32::from_rgba_unmultiplied(250, 176, 5, (90.0 * k) as u8));
+                        }
+                    }
                     if let Some((_, is_err)) = err {
                         let c = if *is_err { Color32::from_rgba_unmultiplied(230, 60, 60, 38) } else { Color32::from_rgba_unmultiplied(230, 170, 30, 38) };
                         painter.rect_filled(wide, 0.0, c);
@@ -870,6 +982,24 @@ impl App {
         if changed {
             self.dirty = true;
             self.reparse();
+        }
+        // A cursor moved in the text selects the node or edge named there.
+        if let Some((byte, line, focused)) = cursor_at {
+            if focused && self.cursor_byte != Some(byte) {
+                self.cursor_byte = Some(byte);
+                let found = self.flow().and_then(|f| edit::item_at(f, byte, line)).map(|it| match it {
+                    edit::TextItem::Node(id) => Sel::Node(id),
+                    edit::TextItem::Edge(i) => Sel::Edge(i),
+                });
+                if let Some(sel) = found {
+                    if sel != self.sel {
+                        self.sel = sel;
+                        self.sel_from_text = true;
+                    }
+                }
+            } else if !focused {
+                self.cursor_byte = None;
+            }
         }
     }
 
@@ -912,10 +1042,10 @@ impl App {
                 ui.separator();
             }
             if ui.add_enabled(!self.history.is_empty(), egui::Button::new(self.tr("Undo"))).clicked() {
-                self.undo();
+                self.undo(now);
             }
             if ui.add_enabled(!self.future.is_empty(), egui::Button::new(self.tr("Redo"))).clicked() {
-                self.redo();
+                self.redo(now);
             }
             ui.separator();
             if ui.button("−").on_hover_text(self.tr("Zoom out")).clicked() {
@@ -934,11 +1064,90 @@ impl App {
         });
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui, now: f64) {
-        let Some(flow) = self.flow().cloned() else {
-            ui.weak(self.tr("Visual editing works on flowcharts; edit the text for this diagram type."));
+    /// Whether the label box of the style panel has the keyboard.
+    fn label_focused(ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(egui::Id::new("label_field")))
+    }
+
+    /// Saves a label typed in the style panel on the node or edge it was typed for. It waits while
+    /// the box still has the keyboard for that same selection; it saves at once when the box lost
+    /// focus (`focused` false), when the selection moved elsewhere, and before anything else
+    /// changes the diagram (delete, undo, redo, a new node).
+    fn commit_label(&mut self, focused: bool, now: f64) {
+        let Some(target) = self.label_editing.clone() else { return };
+        if focused && target == self.sel {
+            return;
+        }
+        self.label_editing = None;
+        let text = self.label_buf.clone();
+        let Some(f) = self.flow() else { return };
+        let r = match &target {
+            Sel::Node(id) => match f.node_index(id).and_then(|i| f.nodes.get(i)) {
+                Some(n) if n.label != text => edit::set_node(&self.text, id, Some(&text), None),
+                _ => return,
+            },
+            Sel::Edge(i) => match f.edges.get(*i) {
+                Some(e) if e.label.clone().unwrap_or_default() != text => {
+                    let ends = (e.from.clone(), e.to.clone());
+                    let r = edit::set_edge(&self.text, *i, Some(Some(text.as_str())), None);
+                    // A shared link (`A & B --> C`) moves the edge to a line of its own and the edge
+                    // numbers shift: keep the selection on the same edge.
+                    if self.visual(r, now) && self.sel == target {
+                        let label = Some(text);
+                        if let Some(n) = self.flow().and_then(|f| f.edges.iter().position(|e| e.from == ends.0 && e.to == ends.1 && e.label == label)) {
+                            self.sel = Sel::Edge(n);
+                            self.last_sel = self.sel.clone();
+                        }
+                    }
+                    return;
+                }
+                _ => return,
+            },
+            Sel::None => return,
+        };
+        self.visual(r, now);
+    }
+
+    /// The tools and the style panel, floating over the canvas.
+    fn floating(&mut self, ctx: &egui::Context, now: f64) {
+        // A label left behind by a click in the text is saved before the panel follows the text.
+        // Esc gives up what was typed (egui drops the focus on Esc as the frame starts).
+        if self.label_editing.is_some() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.label_editing = None;
+        }
+        self.commit_label(Self::label_focused(ctx), now);
+        let Some(rect) = self.canvas_rect else {
+            // The canvas is placed in this frame; draw the tools in the next one.
+            ctx.request_repaint();
             return;
         };
+        let frame = egui::Frame::popup(&ctx.global_style()).corner_radius(10.0).inner_margin(egui::Margin::symmetric(10, 6));
+        let bar = egui::Area::new(egui::Id::new("float_toolbar")).fixed_pos(rect.center_top() + Vec2::new(0.0, 10.0)).pivot(egui::Align2::CENTER_TOP).constrain_to(rect).show(ctx, |ui| {
+            frame.show(ui, |ui| {
+                // Wraps to a second row when the canvas is narrow.
+                ui.set_max_width((rect.width() - 40.0).max(200.0));
+                self.toolbar(ui, now);
+            });
+        });
+        self.tools_h = bar.response.rect.height();
+        if self.flow().is_some() && self.sel != Sel::None {
+            let panel = egui::Frame::popup(&ctx.global_style()).corner_radius(10.0).inner_margin(egui::Margin::same(12));
+            egui::Area::new(egui::Id::new("float_inspector")).fixed_pos(rect.right_top() + Vec2::new(-12.0, 10.0 + self.tools_h + 10.0)).pivot(egui::Align2::RIGHT_TOP).constrain_to(rect).show(ctx, |ui| {
+                panel.show(ui, |ui| {
+                    ui.set_width(236.0);
+                    self.inspector(ui, now);
+                });
+            });
+        }
+    }
+
+    /// Style panel of the selected node or edge.
+    fn inspector(&mut self, ui: &mut egui::Ui, now: f64) {
+        // A new node asks for the label box: save what was being typed for the previous one first.
+        if self.focus_label {
+            self.commit_label(false, now);
+        }
+        let Some(flow) = self.flow().cloned() else { return };
         let sel = self.sel.clone();
         // Keep the label box in step with the selection unless it is being edited.
         let current_label = match &sel {
@@ -946,84 +1155,148 @@ impl App {
             Sel::Edge(i) => flow.edges.get(*i).map(|e| e.label.clone().unwrap_or_default()),
             Sel::None => None,
         };
-        if self.label_for.as_ref() != Some(&sel) {
+        // Keep the label box in step with the selection and with the text, unless a label typed in it
+        // is still waiting to be saved.
+        if self.label_editing.is_none() {
             self.label_buf = current_label.clone().unwrap_or_default();
-            self.label_for = Some(sel.clone());
         }
+        let section = |ui: &mut egui::Ui, text: &str| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(text).small().weak());
+        };
         match &sel {
-            Sel::None => {
-                ui.weak(if self.link_from.is_some() { self.tr("Click the node to connect to") } else { self.tr("Click a node or an edge to edit it. + Node adds a node; Link (or dragging from one node to another) connects them. Drag a group by its title to move it.") });
-            }
+            Sel::None => {}
             Sel::Node(id) => {
                 let Some(node) = flow.node_index(id).and_then(|i| flow.nodes.get(i)).cloned() else { return };
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(format!("{} {}", self.tr("Node"), node.id)).strong());
-                    ui.label(self.tr("Label"));
-                    let id_label = egui::Id::new("label_field");
-                    let resp = ui.add(egui::TextEdit::singleline(&mut self.label_buf).id(id_label).desired_width(180.0));
-                    if self.focus_label {
-                        self.focus_label = false;
-                        resp.request_focus();
-                        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id_label) {
-                            let n = self.label_buf.chars().count();
-                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
-                            st.store(ui.ctx(), id_label);
-                        }
+                ui.label(RichText::new(format!("{} {}", self.tr("Node"), node.id)).strong());
+                section(ui, self.tr("Label"));
+                let id_label = egui::Id::new("label_field");
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.label_buf).id(id_label).desired_width(f32::INFINITY));
+                if self.focus_label {
+                    self.focus_label = false;
+                    resp.request_focus();
+                    if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id_label) {
+                        let n = self.label_buf.chars().count();
+                        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
+                        st.store(ui.ctx(), id_label);
                     }
-                    if resp.lost_focus() && self.label_buf != node.label {
-                        let r = edit::set_node(&self.text, &node.id, Some(&self.label_buf), None);
-                        self.visual(r, now);
-                    }
-                    ui.label(self.tr("Shape"));
-                    let mut shape = node.shape;
-                    egui::ComboBox::from_id_salt("shape").selected_text(self.tr(shape.name())).show_ui(ui, |ui| {
-                        for s in NodeShape::all() {
-                            ui.selectable_value(&mut shape, s, self.tr(s.name()));
-                        }
-                    });
-                    if shape != node.shape {
-                        let r = edit::set_node(&self.text, &node.id, None, Some(shape));
-                        self.visual(r, now);
-                    }
-                    if ui.button(self.tr("Delete")).clicked() {
-                        self.delete_selected(now);
+                }
+                if resp.has_focus() {
+                    self.label_editing = Some(sel.clone());
+                }
+                section(ui, self.tr("Shape"));
+                let mut shape = node.shape;
+                egui::ComboBox::from_id_salt("shape").width(ui.available_width()).selected_text(self.tr(shape.name())).show_ui(ui, |ui| {
+                    for s in NodeShape::all() {
+                        ui.selectable_value(&mut shape, s, self.tr(s.name()));
                     }
                 });
+                if shape != node.shape {
+                    let r = edit::set_node(&self.text, &node.id, None, Some(shape));
+                    self.visual(r, now);
+                }
+                // Colour: automatic (look and group) or one of the palette tones.
+                // The panel shows and rewrites the node's own `style` line.
+                let styles = edit::own_node_style(&self.text, &flow, &node.id);
+                let shared = flow.node_styles.get(&node.id).is_some_and(|all| all != &styles) || !node.classes.is_empty();
+                let fill = styles.get("fill").map(|v| v.to_ascii_lowercase());
+                section(ui, self.tr("Colour"));
+                let mut pick: Option<Option<engine::look::Hue>> = None;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(5.0);
+                    if ui.selectable_label(fill.is_none(), self.tr("Auto")).clicked() {
+                        pick = Some(None);
+                    }
+                    for (name, hue) in engine::look::SWATCHES {
+                        let chosen = fill.as_deref() == Some(engine::look::hex(hue.light).as_str());
+                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                        let p = ui.painter();
+                        p.rect_filled(r.shrink(1.0), 5.0, paint::shade(hue.light, self.dark));
+                        p.rect_stroke(r.shrink(1.0), 5.0, Stroke::new(if chosen { 2.6 } else { 1.2 }, paint::shade(hue.stroke, self.dark)), egui::StrokeKind::Inside);
+                        if resp.on_hover_text(self.tr(name)).clicked() {
+                            pick = Some(Some(hue));
+                        }
+                    }
+                });
+                if let Some(choice) = pick {
+                    self.restyle(
+                        &node.id,
+                        |m| match choice {
+                            None => {
+                                m.remove("fill");
+                                m.remove("stroke");
+                            }
+                            Some(h) => {
+                                m.insert("fill".into(), engine::look::hex(h.light));
+                                m.insert("stroke".into(), engine::look::hex(h.stroke));
+                            }
+                        },
+                        now,
+                    );
+                }
+                // Outline: solid or dashed.
+                section(ui, self.tr("Outline"));
+                let dashed = styles.contains_key("stroke-dasharray");
+                let mut want = dashed;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut want, false, self.tr("Solid"));
+                    ui.selectable_value(&mut want, true, self.tr("Dashed"));
+                });
+                if want != dashed {
+                    self.restyle(
+                        &node.id,
+                        |m| {
+                            if want {
+                                m.insert("stroke-dasharray".into(), "5 5".into());
+                            } else {
+                                m.remove("stroke-dasharray");
+                            }
+                        },
+                        now,
+                    );
+                }
+                if shared {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(self.tr("Part of this node's style comes from a class or a shared style line; the panel changes only its own line.")).small().weak());
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                if ui.button(self.tr("Delete")).clicked() {
+                    self.delete_selected(now);
+                }
             }
             Sel::Edge(i) => {
                 let Some(e) = flow.edges.get(*i).cloned() else { return };
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(format!("{} {} → {}", self.tr("Edge"), e.from, e.to)).strong());
-                    ui.label(self.tr("Label"));
-                    let resp = ui.add(egui::TextEdit::singleline(&mut self.label_buf).id(egui::Id::new("label_field")).desired_width(160.0));
-                    if resp.lost_focus() && self.label_buf != e.label.clone().unwrap_or_default() {
-                        let text = self.label_buf.clone();
-                        let r = edit::set_edge(&self.text, *i, Some(Some(text.as_str())), None);
-                        self.visual(r, now);
-                    }
-                    ui.label(self.tr("Line"));
-                    let mut style = e.kind.style;
-                    egui::ComboBox::from_id_salt("edge_style").selected_text(self.tr(style.name())).show_ui(ui, |ui| {
-                        for s in [LineStyle::Solid, LineStyle::Dotted, LineStyle::Thick, LineStyle::Invisible] {
-                            ui.selectable_value(&mut style, s, self.tr(s.name()));
-                        }
-                    });
-                    ui.label(self.tr("Arrow"));
-                    let mut head = e.kind.head_end;
-                    egui::ComboBox::from_id_salt("edge_head").selected_text(self.tr(head.name())).show_ui(ui, |ui| {
-                        for h in [Head::Arrow, Head::None, Head::Circle, Head::Cross] {
-                            ui.selectable_value(&mut head, h, self.tr(h.name()));
-                        }
-                    });
-                    if style != e.kind.style || head != e.kind.head_end {
-                        let kind = LinkKind { style, head_end: head, ..e.kind };
-                        let r = edit::set_edge(&self.text, *i, None, Some(kind));
-                        self.visual(r, now);
-                    }
-                    if ui.button(self.tr("Delete")).clicked() {
-                        self.delete_selected(now);
+                ui.label(RichText::new(format!("{} {} → {}", self.tr("Edge"), e.from, e.to)).strong());
+                section(ui, self.tr("Label"));
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.label_buf).id(egui::Id::new("label_field")).desired_width(f32::INFINITY));
+                if resp.has_focus() {
+                    self.label_editing = Some(sel.clone());
+                }
+                section(ui, self.tr("Line"));
+                let mut style = e.kind.style;
+                egui::ComboBox::from_id_salt("edge_style").width(ui.available_width()).selected_text(self.tr(style.name())).show_ui(ui, |ui| {
+                    for s in [LineStyle::Solid, LineStyle::Dotted, LineStyle::Thick, LineStyle::Invisible] {
+                        ui.selectable_value(&mut style, s, self.tr(s.name()));
                     }
                 });
+                section(ui, self.tr("Arrow"));
+                let mut head = e.kind.head_end;
+                egui::ComboBox::from_id_salt("edge_head").width(ui.available_width()).selected_text(self.tr(head.name())).show_ui(ui, |ui| {
+                    for h in [Head::Arrow, Head::None, Head::Circle, Head::Cross] {
+                        ui.selectable_value(&mut head, h, self.tr(h.name()));
+                    }
+                });
+                if style != e.kind.style || head != e.kind.head_end {
+                    let kind = LinkKind { style, head_end: head, ..e.kind };
+                    let r = edit::set_edge(&self.text, *i, None, Some(kind));
+                    self.visual(r, now);
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                if ui.button(self.tr("Delete")).clicked() {
+                    self.delete_selected(now);
+                }
             }
         }
     }
@@ -1032,8 +1305,8 @@ impl App {
         let size = ui.available_size();
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
-        let bg = if self.dark { Color32::from_gray(38) } else { Color32::from_gray(244) };
-        painter.rect_filled(rect, 0.0, bg);
+        self.canvas_rect = Some(rect);
+        painter.rect_filled(rect, 0.0, paint::paper(self.scene.as_deref(), self.dark));
         let Some(scene) = self.scene.clone() else {
             let msg = self.parsed.diagnostics.first().map_or(self.tr("Nothing to draw yet.").to_string(), |d| format!("{} {}: {}", self.tr("Line"), d.line, d.message));
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(15.0), Color32::from_rgb(200, 80, 80));
@@ -1041,9 +1314,11 @@ impl App {
         };
         let (sw, sh) = (scene.width.max(1.0), scene.height.max(1.0));
         if self.auto_fit {
-            let z = ((rect.width() - 40.0) / sw).min((rect.height() - 40.0) / sh).clamp(0.1, 1.5);
+            // Leave room for the floating tools at the top.
+            let top = self.tools_h + 16.0;
+            let z = ((rect.width() - 40.0) / sw).min((rect.height() - 40.0 - top) / sh).clamp(0.1, 1.5);
             self.zoom = z;
-            self.pan = Vec2::new((rect.width() - sw * z) / 2.0, (rect.height() - sh * z) / 2.0);
+            self.pan = Vec2::new((rect.width() - sw * z) / 2.0, top + (rect.height() - top - sh * z) / 2.0);
         }
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
         if resp.hovered() {
@@ -1078,7 +1353,21 @@ impl App {
             }
         }
         let view = View { origin: rect.min + self.pan, zoom: self.zoom };
-        paint::draw(&painter, &scene, &view);
+        paint::dot_grid(&painter, rect, &view, self.dark);
+        paint::draw(&painter, &scene, &view, self.dark);
+        // With nothing selected, a short hint at the foot of the canvas.
+        if self.sel == Sel::None {
+            let hint = if self.flow().is_none() {
+                self.tr("Visual editing works on flowcharts; edit the text for this diagram type.")
+            } else if self.link_from.is_some() {
+                self.tr("Click the node to connect to")
+            } else {
+                self.tr("Click a node or an edge to edit it. + Node adds a node; Link (or dragging from one node to another) connects them. Drag a group by its title to move it.")
+            };
+            let weak = if self.dark { Color32::from_gray(150) } else { Color32::from_gray(120) };
+            let galley = painter.layout(hint.to_string(), egui::FontId::proportional(12.5), weak, (rect.width() - 28.0).max(120.0));
+            painter.galley(rect.left_bottom() + Vec2::new(14.0, -12.0 - galley.size().y), galley, weak);
+        }
         let is_flow = self.flow().is_some();
         let accent = Color32::from_rgb(40, 120, 255);
         let hit_at = |p: egui::Pos2| paint::hit_test(&scene, view.to_scene(p), 6.0 / view.zoom.max(0.1));
@@ -1359,11 +1648,12 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, now));
         let width = ui.available_width();
         egui::Panel::left("editor").resizable(true).default_size(width * 0.42).min_size(240.0).show(ui, |ui| self.editor(ui));
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, now));
-            egui::Panel::top("inspector").show(ui, |ui| self.inspector(ui, now));
-            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.canvas(ui, now));
-        });
+        // The floating tools go first (placed over last frame's canvas): a label being typed in the
+        // style panel is saved before a click on the canvas changes the selection.
+        self.floating(&ctx, now);
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.canvas(ui, now));
+        // The label box may have lost focus to a click anywhere this frame (canvas, tool bar, Enter).
+        self.commit_label(Self::label_focused(&ctx), now);
         if self.show_about {
             let mut open = true;
             egui::Window::new(self.tr("About MermaidCraft")).open(&mut open).collapsible(false).resizable(false).show(&ctx, |ui| {
@@ -1375,5 +1665,24 @@ impl eframe::App for App {
         }
         self.prompt_window(&ctx, now);
         self.handle_screenshot(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_lines;
+
+    #[test]
+    fn changed_lines_cover_edits_inserts_and_deletes() {
+        let base = "flowchart TD\n  A --> B\n  B --> C\n";
+        // A line changed in the middle.
+        assert_eq!(changed_lines(base, "flowchart TD\n  A --> X\n  B --> C\n"), Some((2, 2)));
+        // A line added at the end (style written by the panel).
+        assert_eq!(changed_lines(base, "flowchart TD\n  A --> B\n  B --> C\n  style A fill:#fff\n"), Some((4, 4)));
+        // A line replaced and one appended (old style line removed, new one at the end).
+        assert_eq!(changed_lines("a\nstyle A x\nb\n", "a\nb\nstyle A y\n"), Some((2, 3)));
+        // A pure deletion marks where the text went.
+        assert_eq!(changed_lines(base, "flowchart TD\n  B --> C\n"), Some((2, 2)));
+        assert_eq!(changed_lines(base, base), None);
     }
 }
