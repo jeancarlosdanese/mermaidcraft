@@ -1,6 +1,6 @@
 # FEAT: notas ao lado dos nós e grupos que se movem inteiros
 
-Estado: implementado, aguardando revisão · 18/11/2026
+Estado: entregue na 0.4.0 (18/11/2026)
 
 ## Objetivo
 
