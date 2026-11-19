@@ -537,3 +537,64 @@ fn moving_a_group_moves_everything_inside() {
     assert!(text.contains("sub:G=120,40"));
     assert_eq!(flow(&text).offsets.get("sub:G"), Some(&(120.0, 40.0)));
 }
+
+#[test]
+fn node_style_is_written_replaced_and_removed() {
+    let src = "flowchart TD\n  A[Um] --> B[Dois]\n  style A fill:#fff,color:#333\n  style A,B stroke-width:3px\n  C --> D\n  %% mermaidcraft:layout B=10,0\n";
+    let props = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<StyleMap>();
+    // The panel starts from the node's own line only, not from the shared one.
+    let f = flow(src);
+    let own = edit::own_node_style(src, &f, "A");
+    assert_eq!(own, props(&[("fill", "#fff"), ("color", "#333")]));
+    // One own line: replaced in place, nothing else moves.
+    let mut p = own.clone();
+    p.insert("fill".into(), "#d0ebff".into());
+    p.insert("stroke".into(), "#1971c2".into());
+    let out = edit::set_node_style(src, "A", &p).unwrap();
+    assert_eq!(out, src.replace("style A fill:#fff,color:#333", "style A color:#333,fill:#d0ebff,stroke:#1971c2"));
+    // A new line goes before the layout comment.
+    let out2 = edit::set_node_style(&out, "B", &props(&[("stroke-dasharray", "5 5")])).unwrap();
+    assert!(out2.ends_with("  C --> D\n  style B stroke-dasharray:5 5\n  %% mermaidcraft:layout B=10,0\n"), "{out2}");
+    // Empty map: the own line goes (whole line), the shared one stays.
+    let out3 = edit::set_node_style(&out2, "A", &StyleMap::new()).unwrap();
+    assert!(!out3.contains("style A color") && out3.contains("style A,B stroke-width:3px"), "{out3}");
+    assert_eq!(out3.lines().count(), out2.lines().count() - 1, "{out3}");
+    // Two own lines become one; CRLF files keep CRLF.
+    let crlf = "flowchart TD\r\n  A --> B\r\n  style A fill:#fff\r\n  style A stroke:#000\r\n";
+    let out4 = edit::set_node_style(crlf, "A", &props(&[("fill", "#eee")])).unwrap();
+    assert_eq!(out4, "flowchart TD\r\n  A --> B\r\n  style A fill:#eee\r\n");
+    // Bad input is refused.
+    assert!(edit::set_node_style(src, "Z", &StyleMap::new()).is_err());
+    assert!(edit::set_node_style(src, "A", &props(&[("fill", "#fff;evil")])).is_err());
+    assert!(edit::set_node_style(src, "A", &props(&[("fill", "#fff\n  X --> Y")])).is_err());
+}
+
+#[test]
+fn text_place_names_the_node_or_edge_under_it() {
+    let src = "flowchart TD\n  A --> B\n  B[Dois] -- sim --> C\n  subgraph G\n    C\n  end\n  style C fill:#fff\n";
+    let f = flow(src);
+    let at = |needle: &str, off: usize, line: usize| edit::item_at(&f, src.find(needle).unwrap() + off, line);
+    // The id under the cursor, wherever it is on the line.
+    assert_eq!(at("A -->", 0, 2), Some(edit::TextItem::Node("A".into())));
+    assert_eq!(at("B\n", 0, 2), Some(edit::TextItem::Node("B".into())));
+    // The definition line of B selects B, even though B first shows up on line 2.
+    assert_eq!(at("Dois", 0, 3), Some(edit::TextItem::Node("B".into())));
+    // The link token selects its edge.
+    let e = f.edges.iter().position(|e| e.from == "B" && e.to == "C").unwrap();
+    assert_eq!(at("sim", 0, 3), Some(edit::TextItem::Edge(e)));
+    // A lone id inside a group and a style line select that node.
+    assert_eq!(at("    C", 4, 5), Some(edit::TextItem::Node("C".into())));
+    assert_eq!(at("style C", 0, 7), Some(edit::TextItem::Node("C".into())));
+    // Indentation before a statement falls back to its first node.
+    assert_eq!(edit::item_at(&f, src.find("  A -->").unwrap(), 2), Some(edit::TextItem::Node("A".into())));
+    // `end` names nothing.
+    assert_eq!(at("end", 0, 6), None);
+    // A group id is not a node; a link drawn as two edges names neither.
+    let src2 = "flowchart TD\n  subgraph G\n    X\n  end\n  A --> G\n  X & Y --> Z\n  style G fill:#fff\n";
+    let f2 = flow(src2);
+    let at2 = |needle: &str, off: usize, line: usize| edit::item_at(&f2, src2.find(needle).unwrap() + off, line);
+    assert_eq!(at2("G\n  X &", 0, 5), None);
+    assert_eq!(at2("style G", 6, 7), None);
+    assert_eq!(at2("--> Z", 1, 6), None);
+    assert_eq!(at2("Y -->", 0, 6), Some(edit::TextItem::Node("Y".into())));
+}
