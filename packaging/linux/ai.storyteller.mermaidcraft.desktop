@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=MermaidCraft
+GenericName=Mermaid Diagram Editor
+GenericName[pt_BR]=Editor de diagramas Mermaid
+Comment=Write and preview Mermaid diagrams
+Comment[pt_BR]=Escreva e visualize diagramas Mermaid
+Exec=mermaidcraft %F
+Icon=ai.storyteller.mermaidcraft
+Terminal=false
+Categories=Development;
+MimeType=text/vnd.mermaid;
+Keywords=mermaid;diagram;flowchart;sequence;fluxograma;diagrama;
+StartupNotify=true
+StartupWMClass=ai.storyteller.mermaidcraft

@@ -1,5 +1,5 @@
-//! Tiny settings file (language, theme and diagram look) in the user's application support
-//! folder.
+//! Tiny settings file (language, theme and diagram look), in the place `prefs::path` gives for
+//! each system.
 
 use mermaidcraft_engine::{RenderOptions, prefs};
 
