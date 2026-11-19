@@ -1,6 +1,6 @@
 # FEAT: Linux e Windows
 
-Estado: implementado na branch `feat/linux-windows`, aguardando revisão · 19/11/2026
+Estado: entregue na 0.6.0 (19/11/2026)
 
 ## Objetivo
 
