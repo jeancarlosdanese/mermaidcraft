@@ -42,7 +42,9 @@ type_complexity = "allow"
 [package]
 name = "mermaidcraft"
 description = "MermaidCraft: native Mermaid diagram editor (egui shell over the MermaidCraft engine)"
-version.workspace = true
+# Written here (not inherited) so tools that read the version straight from this file, such as the
+# shell prompt, show it plainly. Keep it equal to [workspace.package] (checked by a test).
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true

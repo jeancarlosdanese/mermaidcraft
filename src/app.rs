@@ -1673,6 +1673,14 @@ mod tests {
     use super::changed_lines;
 
     #[test]
+    fn app_version_matches_the_workspace() {
+        // The app writes its version in its own [package]; the engine and the CLI inherit it.
+        let manifest = include_str!("../Cargo.toml");
+        let ws = manifest.split("[workspace.package]").nth(1).and_then(|r| r.lines().find_map(|l| l.trim().strip_prefix("version = "))).map(|v| v.trim_matches('"'));
+        assert_eq!(ws, Some(env!("CARGO_PKG_VERSION")), "[package] and [workspace.package] versions differ in Cargo.toml");
+    }
+
+    #[test]
     fn changed_lines_cover_edits_inserts_and_deletes() {
         let base = "flowchart TD\n  A --> B\n  B --> C\n";
         // A line changed in the middle.
