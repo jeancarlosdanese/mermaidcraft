@@ -1,6 +1,6 @@
 # FEAT: interface do editor (fase C)
 
-Estado: implementado na branch `feat/ux-editor`, aguardando revisão · 18/11/2026
+Estado: entregue na 0.5.0 (19/11/2026)
 
 ## Objetivo
 
