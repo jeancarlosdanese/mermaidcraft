@@ -7,6 +7,15 @@ use crate::model::Direction;
 pub struct LItem {
     pub w: f32,
     pub h: f32,
+    /// Room kept free on one side only, across the flow (right of a top-down layout, below a
+    /// left-right one); the item's centre stays where its edges meet it.
+    pub side: f32,
+}
+
+impl LItem {
+    pub fn new(w: f32, h: f32) -> Self {
+        LItem { w, h, side: 0.0 }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +62,8 @@ struct G {
     /// Real nodes first, then dummies.
     w: Vec<f32>,
     h: Vec<f32>,
+    /// Room kept on the far side, across the layers.
+    side: Vec<f32>,
     layer: Vec<usize>,
     is_dummy: Vec<bool>,
     up: Vec<Vec<usize>>,
@@ -277,6 +288,7 @@ pub fn layered(items: &[LItem], edges: &[LEdge], dir: Direction, sp: Spacing) ->
     let mut g = G {
         w: items.iter().map(&sw).collect(),
         h: items.iter().map(&sh).collect(),
+        side: items.iter().map(|it| it.side.max(0.0)).collect(),
         layer: rank.clone(),
         is_dummy: vec![false; n],
         up: vec![Vec::new(); n],
@@ -309,6 +321,7 @@ pub fn layered(items: &[LItem], edges: &[LEdge], dir: Direction, sp: Spacing) ->
                 }
                 g.w.push(w);
                 g.h.push(h);
+                g.side.push(0.0);
                 g.layer.push(lu + k);
                 g.is_dummy.push(true);
                 g.up.push(Vec::new());
@@ -443,7 +456,7 @@ pub fn layered(items: &[LItem], edges: &[LEdge], dir: Direction, sp: Spacing) ->
         let wa = g.w.get(a).copied().unwrap_or(0.0);
         let wb = g.w.get(b).copied().unwrap_or(0.0);
         let both_real = !g.is_dummy.get(a).copied().unwrap_or(false) && !g.is_dummy.get(b).copied().unwrap_or(false);
-        (wa + wb) / 2.0 + if both_real { sp.node_sep } else { sp.edge_sep }
+        (wa + wb) / 2.0 + g.side.get(a).copied().unwrap_or(0.0) + if both_real { sp.node_sep } else { sp.edge_sep }
     };
     let mut x = vec![0f32; total];
     for l in &layers {
@@ -538,7 +551,7 @@ pub fn layered(items: &[LItem], edges: &[LEdge], dir: Direction, sp: Spacing) ->
         let xv = x.get(v).copied().unwrap_or(0.0);
         let yv = ly.get(g.layer.get(v).copied().unwrap_or(0)).copied().unwrap_or(0.0);
         min_x = min_x.min(xv - w / 2.0);
-        max_x = max_x.max(xv + w / 2.0);
+        max_x = max_x.max(xv + w / 2.0 + g.side.get(v).copied().unwrap_or(0.0));
         min_y = min_y.min(yv - h / 2.0);
         max_y = max_y.max(yv + h / 2.0);
     }

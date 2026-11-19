@@ -1,6 +1,6 @@
 # FEAT: layout legível e preferências compartilhadas
 
-Estado: implementado, aguardando revisão · 18/11/2026
+Estado: entregue na 0.3.0 (18/11/2026)
 
 ## Objetivo
 

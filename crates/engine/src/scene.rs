@@ -110,6 +110,8 @@ pub struct Scene {
     pub node_boxes: Vec<Rect>,
     /// Polyline of every edge, indexed by edge number.
     pub edge_paths: Vec<Vec<(f32, f32)>>,
+    /// Frames of the subgraphs (flowchart), indexed by subgraph number.
+    pub cluster_boxes: Vec<Rect>,
     /// Total translation applied by `finish` to the raw layout coordinates.
     pub shift: (f32, f32),
     /// Typeface of the text.
@@ -371,7 +373,7 @@ impl Scene {
                 }
             }
         }
-        for b in &mut self.node_boxes {
+        for b in self.node_boxes.iter_mut().chain(self.cluster_boxes.iter_mut()) {
             b.x += dx;
             b.y += dy;
         }

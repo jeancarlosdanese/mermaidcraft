@@ -38,8 +38,9 @@ enum Tool {
 enum Drag {
     Pan,
     Link { from: usize },
-    /// Moving a node by hand: its id and the offset it has now.
-    Move { id: String, offset: (f32, f32) },
+    /// Moving a node or a whole group by hand: its key in the layout comment (the node id, or
+    /// `sub:<id>` for a group) and the offset it has now.
+    Move { id: String, offset: (f32, f32), group: bool },
 }
 
 struct MdState {
@@ -951,7 +952,7 @@ impl App {
         }
         match &sel {
             Sel::None => {
-                ui.weak(if self.link_from.is_some() { self.tr("Click the node to connect to") } else { self.tr("Click a node or an edge to edit it. + Node adds a node; Link (or dragging from one node to another) connects them.") });
+                ui.weak(if self.link_from.is_some() { self.tr("Click the node to connect to") } else { self.tr("Click a node or an edge to edit it. + Node adds a node; Link (or dragging from one node to another) connects them. Drag a group by its title to move it.") });
             }
             Sel::Node(id) => {
                 let Some(node) = flow.node_index(id).and_then(|i| flow.nodes.get(i)).cloned() else { return };
@@ -1115,6 +1116,8 @@ impl App {
         if let Some(p) = pointer {
             if is_flow && matches!(hit_at(p), Hit::Node(_)) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            } else if is_flow && self.drag.is_none() && matches!(hit_at(p), Hit::Cluster(_) | Hit::Nothing) && paint::group_handle_at(&scene, view.to_scene(p)).is_some() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
         }
         let flow_ids: Vec<String> = self.flow().map(|f| f.nodes.iter().map(|n| n.id.clone()).collect()).unwrap_or_default();
@@ -1128,10 +1131,29 @@ impl App {
                             let offset = self.flow().and_then(|f| f.offsets.get(id).copied()).unwrap_or((0.0, 0.0));
                             self.auto_fit = false;
                             self.sel = Sel::Node(id.clone());
-                            Drag::Move { id: id.clone(), offset }
+                            Drag::Move { id: id.clone(), offset, group: false }
                         }
                         None => Drag::Pan,
                     },
+                    // The title strip of a group frame moves the whole group.
+                    Hit::Cluster(_) | Hit::Nothing if is_flow && !linking => {
+                        // Only a group whose id is unique and fits the layout comment can be kept.
+                        let key = paint::group_handle_at(&scene, view.to_scene(p)).and_then(|c| {
+                            let f = self.flow()?;
+                            let id = &f.subgraphs.get(c)?.id;
+                            let unique = f.subgraphs.iter().filter(|sg| &sg.id == id).count() == 1;
+                            let storable = !id.is_empty() && !id.contains(|ch: char| ch.is_whitespace() || ch == '=' || ch == ',');
+                            (unique && storable).then(|| engine::flowchart::group_offset_key(id))
+                        });
+                        match key {
+                            Some(key) => {
+                                let offset = self.flow().and_then(|f| f.offsets.get(&key).copied()).unwrap_or((0.0, 0.0));
+                                self.auto_fit = false;
+                                Drag::Move { id: key, offset, group: true }
+                            }
+                            None => Drag::Pan,
+                        }
+                    }
                     _ => Drag::Pan,
                 });
             }
@@ -1158,10 +1180,10 @@ impl App {
                         }
                     }
                 }
-                Some(Drag::Move { id, offset }) => {
+                Some(Drag::Move { id, offset, group }) => {
                     let d = resp.drag_delta() / view.zoom;
-                    let (id, new) = (id.clone(), (offset.0 + d.x, offset.1 + d.y));
-                    self.drag = Some(Drag::Move { id: id.clone(), offset: new });
+                    let (id, new, group) = (id.clone(), (offset.0 + d.x, offset.1 + d.y), *group);
+                    self.drag = Some(Drag::Move { id: id.clone(), offset: new, group });
                     self.redraw_with_offset(&id, new);
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 }
@@ -1169,9 +1191,9 @@ impl App {
             }
         }
         if resp.drag_stopped() {
-            if let Some(Drag::Move { id, offset }) = self.drag.take() {
+            if let Some(Drag::Move { id, offset, group }) = self.drag.take() {
                 self.commit_offset(&id, offset, now);
-                let m = self.tr("Moved a node").to_string();
+                let m = self.tr(if group { "Moved a group" } else { "Moved a node" }).to_string();
                 self.flash(m, now);
                 return;
             }

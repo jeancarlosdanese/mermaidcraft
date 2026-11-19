@@ -95,7 +95,7 @@ pub fn render(er: &ErDiagram, opts: &crate::RenderOptions) -> Scene {
     let font = opts.font;
     let t = &DEFAULT_THEME;
     let tables: Vec<Table> = er.entities.iter().map(|e| table_of(e, font)).collect();
-    let items: Vec<LItem> = tables.iter().map(|tb| LItem { w: tb.w, h: tb.h }).collect();
+    let items: Vec<LItem> = tables.iter().map(|tb| LItem::new(tb.w, tb.h)).collect();
     let edges: Vec<LEdge> = er
         .relations
         .iter()

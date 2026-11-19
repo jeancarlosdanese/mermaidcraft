@@ -4,7 +4,7 @@ use egui::epaint::PathShape;
 use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Shape, Stroke, Vec2};
 use mermaidcraft_engine::geom::dist_to_segment;
 use mermaidcraft_engine::look::Font;
-use mermaidcraft_engine::scene::{Anchor, PathCmd, PrimShape, Scene, Tag};
+use mermaidcraft_engine::scene::{Anchor, PathCmd, PrimShape, Scene};
 
 /// Where the scene is on screen: `screen = origin + scene * zoom`.
 #[derive(Clone, Copy, Debug)]
@@ -154,6 +154,21 @@ pub enum Hit {
     Nothing,
 }
 
+/// Height of the strip at the top of a subgraph frame that drags the whole group.
+pub const GROUP_HANDLE: f32 = 30.0;
+
+/// The subgraph whose title strip is under the point (the innermost one).
+pub fn group_handle_at(scene: &Scene, p: (f32, f32)) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (c, b) in scene.cluster_boxes.iter().enumerate() {
+        let band = GROUP_HANDLE.min(b.h);
+        if p.0 >= b.x && p.0 <= b.x + b.w && p.1 >= b.y && p.1 <= b.y + band && best.is_none_or(|(_, a)| b.w * b.h < a) {
+            best = Some((c, b.w * b.h));
+        }
+    }
+    best.map(|b| b.0)
+}
+
 pub fn hit_test(scene: &Scene, p: (f32, f32), tol: f32) -> Hit {
     for (i, b) in scene.node_boxes.iter().enumerate().rev() {
         if b.contains(p.0, p.1) {
@@ -176,11 +191,9 @@ pub fn hit_test(scene: &Scene, p: (f32, f32), tol: f32) -> Hit {
     }
     // Subgraph frames: the smallest one containing the point.
     let mut cluster: Option<(usize, f32)> = None;
-    for pr in &scene.prims {
-        if let (Tag::Cluster(c), PrimShape::Rect { x, y, w, h, .. }) = (pr.tag, &pr.shape) {
-            if p.0 >= *x && p.0 <= x + w && p.1 >= *y && p.1 <= y + h && cluster.is_none_or(|(_, a)| w * h < a) {
-                cluster = Some((c, w * h));
-            }
+    for (c, b) in scene.cluster_boxes.iter().enumerate() {
+        if b.contains(p.0, p.1) && cluster.is_none_or(|(_, a)| b.w * b.h < a) {
+            cluster = Some((c, b.w * b.h));
         }
     }
     cluster.map_or(Hit::Nothing, |(c, _)| Hit::Cluster(c))

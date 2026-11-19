@@ -428,3 +428,112 @@ fn oversized_png_is_refused_before_drawing() {
     let small = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" viewBox=\"0 0 20 20\"></svg>";
     assert!(export::svg_to_png(small, 1.0).is_ok());
 }
+
+fn frame_of(s: &scene::Scene, c: usize) -> scene::Rect {
+    s.prims
+        .iter()
+        .find_map(|p| match (p.tag, &p.shape) {
+            (scene::Tag::Cluster(k), scene::PrimShape::Rect { x, y, w, h, .. }) if k == c => Some(scene::Rect { x: *x, y: *y, w: *w, h: *h }),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn inside(outer: &scene::Rect, inner: &scene::Rect) -> bool {
+    inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h
+}
+
+#[test]
+fn notes_sit_beside_their_node_inside_its_group() {
+    let src = "flowchart TD\n  subgraph G[Etapa]\n    A[Início] --> B[Meio] --> C[Fim]\n  end\n  N[Nota sobre o meio, com um texto comprido] -.- B\n";
+    let f = flow(src);
+    let (s, _) = render_source_with(src, &RenderOptions::clean()).unwrap();
+    let at = |id: &str| s.node_boxes[f.node_index(id).unwrap()];
+    let (b, n) = (at("B"), at("N"));
+    assert!(n.x > b.x + b.w, "note is not right of its node: {n:?} {b:?}");
+    assert!(n.y < b.y + b.h && b.y < n.y + n.h, "note is not level with its node: {n:?} {b:?}");
+    assert!(inside(&frame_of(&s, 0), &n), "note is outside the group");
+    // The flow stays straight: A, B and C share one column.
+    let cx = |r: scene::Rect| r.x + r.w / 2.0;
+    assert!((cx(at("A")) - cx(b)).abs() < 1.0 && (cx(at("C")) - cx(b)).abs() < 1.0);
+}
+
+#[test]
+fn plain_headless_links_are_not_notes() {
+    // No group: an ordinary link, laid out as before.
+    let src = "flowchart TD\n  A[Um] --- B[Dois]\n";
+    let f = flow(src);
+    let (s, _) = render_source(src).unwrap();
+    let (a, b) = (s.node_boxes[f.node_index("A").unwrap()], s.node_boxes[f.node_index("B").unwrap()]);
+    assert!(b.y > a.y + a.h, "B should stay below A");
+    // A node declared in a group stays in it, even with one headless link to the outside; so do
+    // two single-node groups linked to each other.
+    for src in [
+        "flowchart TD\n  API[Servidor]\n  subgraph Cloud[Nuvem]\n    DB[(Banco)]\n  end\n  API --- DB\n",
+        "flowchart TD\n  subgraph G1[Um]\n    A[A]\n  end\n  subgraph G2[Dois]\n    B[B]\n  end\n  A --- B\n",
+    ] {
+        let f = flow(src);
+        let (s, _) = render_source(src).unwrap();
+        for (i, n) in f.nodes.iter().enumerate() {
+            if let Some(g) = n.parent {
+                assert!(inside(&s.cluster_boxes[g], &s.node_boxes[i]), "{} left its group in {src:?}", n.id);
+            }
+        }
+    }
+    // A labelled link is a real link, not a note.
+    let src = "flowchart TD\n  subgraph G[Etapa]\n    B[Meio]\n  end\n  N[Nota] -.-|veja| B\n";
+    let f = flow(src);
+    let (s, _) = render_source(src).unwrap();
+    assert!(!inside(&s.cluster_boxes[0], &s.node_boxes[f.node_index("N").unwrap()]));
+}
+
+#[test]
+fn a_note_follows_its_node_when_moved() {
+    let base = "flowchart TD\n  subgraph G[Etapa]\n    A[Início] --> B[Meio] --> C[Fim]\n  end\n  N[Nota] -.- B\n";
+    let moved = format!("{base}%% mermaidcraft:layout B=-150,20\n");
+    let f = flow(base);
+    let gap = |src: &str| {
+        let (s, _) = render_source(src).unwrap();
+        let (b, n) = (s.node_boxes[f.node_index("B").unwrap()], s.node_boxes[f.node_index("N").unwrap()]);
+        (n.x - b.x, n.y - b.y)
+    };
+    let (g0, g1) = (gap(base), gap(&moved));
+    assert!((g0.0 - g1.0).abs() < 0.5 && (g0.1 - g1.1).abs() < 0.5, "{g0:?} -> {g1:?}");
+}
+
+#[test]
+fn group_frames_are_known_in_every_look() {
+    let src = "flowchart TD\n  subgraph G[Grupo]\n    A --> B\n  end\n";
+    for opts in [RenderOptions::default(), RenderOptions::clean()] {
+        let (s, _) = render_source_with(src, &opts).unwrap();
+        assert_eq!(s.cluster_boxes.len(), 1);
+        assert!(inside(&s.cluster_boxes[0], &s.node_boxes[0]));
+    }
+}
+
+#[test]
+fn moving_a_group_moves_everything_inside() {
+    let base = "flowchart TD\n  O[Fora] --> A\n  subgraph G[Grupo]\n    A[Um] --> B[Dois]\n  end\n";
+    let moved = format!("{base}%% mermaidcraft:layout sub:G=120,40\n");
+    let f = flow(base);
+    let (s0, _) = render_source_with(base, &RenderOptions::clean()).unwrap();
+    let (s1, _) = render_source_with(&moved, &RenderOptions::clean()).unwrap();
+    let rel = |s: &scene::Scene, id: &str| {
+        let (o, r) = (s.node_boxes[f.node_index("O").unwrap()], s.node_boxes[f.node_index(id).unwrap()]);
+        (r.x - o.x, r.y - o.y)
+    };
+    for id in ["A", "B"] {
+        let (d0, d1) = (rel(&s0, id), rel(&s1, id));
+        assert!((d1.0 - d0.0 - 120.0).abs() < 0.5 && (d1.1 - d0.1 - 40.0).abs() < 0.5, "{id}: {d0:?} -> {d1:?}");
+    }
+    let o0 = s0.node_boxes[f.node_index("O").unwrap()];
+    let o1 = s1.node_boxes[f.node_index("O").unwrap()];
+    let (g0, g1) = (frame_of(&s0, 0), frame_of(&s1, 0));
+    assert!((g1.x - o1.x - (g0.x - o0.x) - 120.0).abs() < 0.5 && (g1.w - g0.w).abs() < 0.5, "frame did not move with its group");
+    // The key round-trips through the layout comment.
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(flowchart::group_offset_key("G"), (120.0, 40.0));
+    let text = edit::set_offsets(base, &map).unwrap();
+    assert!(text.contains("sub:G=120,40"));
+    assert_eq!(flow(&text).offsets.get("sub:G"), Some(&(120.0, 40.0)));
+}
