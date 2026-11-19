@@ -1,6 +1,6 @@
 # MermaidCraft
 
-Editor nativo de diagramas [Mermaid](https://mermaid.js.org) para macOS, escrito em Rust. O texto e o
+Editor nativo de diagramas [Mermaid](https://mermaid.js.org) para macOS, Linux e Windows, escrito em Rust. O texto e o
 desenho ficam lado a lado e andam juntos: o que se faz no desenho vira texto Mermaid, e o arquivo
 continua sendo Mermaid puro, que abre em qualquer lugar.
 
@@ -29,7 +29,10 @@ Diagramas suportados: `flowchart`/`graph`, `sequenceDiagram` e `erDiagram`.
 
 ## Instalação
 
-Requer macOS e Rust (edição 2024).
+Requer Rust (edição 2024) e, para o app, macOS 11+, Linux com Wayland ou X11, ou Windows 10+.
+Não há binários prontos: o app é compilado na própria máquina.
+
+**macOS**
 
 ```sh
 packaging/macos/package.sh          # gera target/macos-package/MermaidCraft.app e bin/
@@ -38,6 +41,40 @@ cp target/macos-package/bin/mermaidcraft-cli ~/.local/bin/
 ```
 
 Sem `MACOS_SIGN_IDENTITY`, o pacote sai com assinatura ad-hoc, que vale só para a própria máquina.
+
+**Linux**
+
+```sh
+packaging/linux/package.sh --install   # compila, gera dist/release/*.tar.gz e instala em ~/.local
+```
+
+Instala `mermaidcraft` e `mermaidcraft-cli` em `~/.local/bin` (outra pasta com `--prefix`), o
+atalho no menu de aplicativos, o ícone e o tipo de arquivo `.mmd` (abrir pelo gerenciador de
+arquivos). Sem `--install`, só gera o `.tar.gz`; para instalá-lo à mão:
+
+```sh
+tar xzf dist/release/mermaidcraft-*.tar.gz -C ~/.local --strip-components=1
+update-mime-database ~/.local/share/mime
+update-desktop-database ~/.local/share/applications
+```
+
+As bibliotecas de Wayland e X11 são carregadas ao abrir o app, então a compilação só precisa do
+Rust; com `inkscape` ou ImageMagick, entram também ícones PNG.
+
+**Windows** (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
+```
+
+Gera `target\windows-package\MermaidCraft\` (`MermaidCraft.exe` e `mermaidcraft-cli.exe`) e um
+`.zip`. Copie a pasta para onde quiser (por exemplo `%LOCALAPPDATA%\Programs\MermaidCraft`) e
+ponha-a no `PATH` para usar o CLI no terminal. O `MermaidCraft.exe` abre sem janela de console, e
+por isso `--help` e `--version` não aparecem no terminal; use o `mermaidcraft-cli` para isso.
+
+As preferências ficam em `~/Library/Application Support/MermaidCraft` (macOS),
+`~/.config/mermaidcraft` (Linux, ou `$XDG_CONFIG_HOME/mermaidcraft`) e `%APPDATA%\MermaidCraft`
+(Windows).
 
 ## Linha de comando
 
@@ -85,7 +122,7 @@ leitores de Mermaid ignoram:
 | `crates/cli` | Linha de comando e servidor MCP |
 | `src` | App (eframe/egui) |
 | `docs` | Documentos de cada funcionalidade |
-| `packaging/macos` | Empacotamento e assinatura |
+| `packaging` | Empacotamento por sistema (`macos`, `linux`, `windows`) |
 
 Testes: `cargo test --workspace`. Lints: `cargo clippy --workspace --all-targets -- -D warnings`.
 
