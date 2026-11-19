@@ -198,6 +198,24 @@ pub fn edge_color(opts: &crate::RenderOptions, classic: Color, source: Color) ->
     }
 }
 
+/// Tones offered for a node's colour in the app, by name.
+pub const SWATCHES: [(&str, Hue); 8] = [("Blue", BLUE), ("Green", GREEN), ("Yellow", YELLOW), ("Red", RED), ("Violet", VIOLET), ("Cyan", CYAN), ("Orange", ORANGE), ("Gray", GRAY)];
+
+/// `#rrggbb` for a colour (alpha left out).
+pub fn hex(c: Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+/// The colour as shown on a dark screen: inverted (93%) with the hue turned half a circle, so
+/// light fills become dark, dark ink becomes light, and blue stays blue (the CSS
+/// `invert(93%) hue-rotate(180deg)` used by Excalidraw).
+pub fn to_dark(c: Color) -> Color {
+    let inv = |v: u8| 0.93 * (255.0 - f32::from(v)) + 0.07 * f32::from(v);
+    let (r, g, b) = (inv(c[0]), inv(c[1]), inv(c[2]));
+    let ch = |x: f32| x.round().clamp(0.0, 255.0) as u8;
+    [ch(-0.574 * r + 1.430 * g + 0.144 * b), ch(0.426 * r + 0.430 * g + 0.144 * b), ch(0.426 * r + 1.430 * g - 0.856 * b), c[3]]
+}
+
 /// Mixes `a` toward `b` by `k` (0 keeps `a`, 1 gives `b`).
 pub fn mix(a: Color, b: Color, k: f32) -> Color {
     let k = k.clamp(0.0, 1.0);
@@ -224,5 +242,16 @@ mod tests {
         }
         assert_eq!(Fill::from_id(" Hachure "), Some(Fill::Hachure));
         assert_eq!(Stroke::from_id("nope"), None);
+    }
+
+    #[test]
+    fn dark_keeps_hue_and_flips_lightness() {
+        assert_eq!(hex([25, 113, 194, 255]), "#1971c2");
+        let white = to_dark([255, 255, 255, 255]);
+        let black = to_dark([0, 0, 0, 255]);
+        assert!(luma(white) < 40.0 && luma(black) > 200.0, "{white:?} {black:?}");
+        // A light blue fill turns into a dark blue, not a dark orange.
+        let d = to_dark(BLUE.light);
+        assert!(luma(d) < 90.0 && d[2] > d[0], "{d:?}");
     }
 }

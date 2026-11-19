@@ -345,6 +345,121 @@ pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Optio
     Ok(append_line(&removed, &format!("{from} {token} {to}")))
 }
 
+/// The span of a statement grown to its whole line (with the line break) when nothing else is on
+/// that line, so removing it leaves no blank line behind.
+fn whole_line(src: &str, span: Span) -> Span {
+    let start = src.get(..span.start).and_then(|b| b.rfind('\n')).map_or(0, |i| i + 1);
+    let end = src.get(span.end..).and_then(|a| a.find('\n')).map_or(src.len(), |i| span.end + i + 1);
+    let before = src.get(start..span.start).unwrap_or("x");
+    let after = src.get(span.end..end).unwrap_or("x");
+    if before.trim().is_empty() && after.trim().trim_start_matches(';').trim().is_empty() { Span::new(start, end) } else { span }
+}
+
+/// The `style` statements that style this node alone (`style A ...`, not `style A,B ...`).
+fn own_style_stmts<'a>(fc: &'a Flowchart, id: &str) -> Vec<&'a Stmt> {
+    fc.statements.iter().filter(|st| matches!(&st.kind, StmtKind::Keyword { word, ids } if word == "style" && ids.len() == 1 && ids.first().is_some_and(|r| r.id == id))).collect()
+}
+
+/// The properties a node gets from its own `style <id> ...` lines. Lines shared with other nodes
+/// and `class` are left out: the style panel only rewrites the node's own line.
+pub fn own_node_style(src: &str, fc: &Flowchart, id: &str) -> StyleMap {
+    let mut m = StyleMap::new();
+    for st in own_style_stmts(fc, id) {
+        let text = src.get(st.span.start..st.span.end).unwrap_or("");
+        let rest = text.trim_start().strip_prefix("style").unwrap_or("").trim_start();
+        let props = rest.find(char::is_whitespace).map_or("", |i| rest.get(i..).unwrap_or(""));
+        m.extend(parse_props(props));
+    }
+    m
+}
+
+/// Adds a line before the `%% mermaidcraft:layout` comment (or at the end), with the file's own
+/// line break.
+fn insert_line(src: &str, line: &str) -> String {
+    let nl = if src.contains("\r\n") { "\r\n" } else { "\n" };
+    let indent = indent_of(src);
+    let mut at = 0usize;
+    for raw in src.split_inclusive('\n') {
+        if raw.trim_start().starts_with(flowchart::LAYOUT_COMMENT) {
+            return format!("{}{indent}{line}{nl}{}", src.get(..at).unwrap_or(""), src.get(at..).unwrap_or(""));
+        }
+        at += raw.len();
+    }
+    let mut out = src.trim_end_matches([' ', '\t']).to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(nl);
+    }
+    format!("{out}{indent}{line}{nl}")
+}
+
+/// Sets the style of one node in a single `style <id> key:value,...` line. With one line of its
+/// own the node keeps it in place; with several they become one (before the layout comment).
+/// Shared `style A,B ...` lines are kept. An empty map removes the node's own lines.
+pub fn set_node_style(src: &str, id: &str, props: &StyleMap) -> Result<String, EditError> {
+    let fc = load(src)?;
+    if fc.node_index(id).is_none() {
+        return Err(EditError::NoSuchNode(id.to_string()));
+    }
+    let bad = |t: &str| t.trim().is_empty() || t.contains([',', ';', '\n', '\r']);
+    if props.iter().any(|(k, v)| bad(k) || bad(v) || k.contains(':')) {
+        return Err(EditError::Invalid("a style value cannot be empty or hold ',' or ';'".into()));
+    }
+    let own = own_style_stmts(&fc, id);
+    let list: Vec<String> = props.iter().map(|(k, v)| format!("{}:{}", k.trim(), v.trim())).collect();
+    let line = format!("style {id} {}", list.join(","));
+    if let [only] = own.as_slice() {
+        if !props.is_empty() {
+            return apply(src, vec![(only.span, line)]);
+        }
+    }
+    let out = apply(src, own.iter().map(|st| (whole_line(src, st.span), String::new())).collect())?;
+    if props.is_empty() { Ok(out) } else { Ok(insert_line(&out, &line)) }
+}
+
+/// What a place of the text names: a node or an edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextItem {
+    Node(String),
+    Edge(usize),
+}
+
+/// The node or edge at byte `at` of the text: the id or link under the cursor, else the first node
+/// of a statement on `line` (1-based). Group ids are not nodes, and a link drawn as several edges
+/// (`A & B --> C`) names none of them.
+pub fn item_at(fc: &Flowchart, at: usize, line: usize) -> Option<TextItem> {
+    let inside = |sp: &Span| sp.start <= at && at <= sp.end;
+    let node = |r: &NodeRef| fc.node_index(&r.id).map(|_| TextItem::Node(r.id.clone()));
+    for (si, st) in fc.statements.iter().enumerate() {
+        if !inside(&st.span) {
+            continue;
+        }
+        match &st.kind {
+            StmtKind::Chain { groups, links } => {
+                if let Some(r) = groups.iter().flat_map(|g| g.nodes.iter()).find(|r| inside(&r.span)) {
+                    return node(r);
+                }
+                if let Some(li) = links.iter().position(|l| inside(&l.span)) {
+                    let mut drawn = fc.edges.iter().enumerate().filter(|(_, e)| e.stmt == si && e.link == li).map(|(i, _)| i);
+                    return match (drawn.next(), drawn.next()) {
+                        (Some(e), None) => Some(TextItem::Edge(e)),
+                        _ => None,
+                    };
+                }
+            }
+            StmtKind::Keyword { ids, .. } => {
+                if let Some(r) = ids.iter().find(|r| inside(&r.span)) {
+                    return node(r);
+                }
+            }
+        }
+    }
+    fc.statements.iter().filter(|st| st.line == line).find_map(|st| match &st.kind {
+        StmtKind::Chain { groups, .. } => groups.first().and_then(|g| g.nodes.first()).and_then(node),
+        StmtKind::Keyword { word, ids } if word == "style" || word == "class" => ids.first().and_then(node),
+        StmtKind::Keyword { .. } => None,
+    })
+}
+
 pub fn set_direction(src: &str, dir: Direction) -> Result<String, EditError> {
     let fc = load(src)?;
     let span = fc.direction_span;

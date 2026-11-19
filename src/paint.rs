@@ -26,6 +26,42 @@ fn col(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
 
+/// A diagram colour on screen: as is, or turned for a dark screen.
+pub fn shade(c: [u8; 4], dark: bool) -> Color32 {
+    col(if dark { mermaidcraft_engine::look::to_dark(c) } else { c })
+}
+
+/// The paper behind the diagram: the scene's background, light or dark.
+pub fn paper(scene: Option<&Scene>, dark: bool) -> Color32 {
+    shade(scene.and_then(|s| s.background).unwrap_or([255, 255, 255, 255]), dark)
+}
+
+/// A grid of faint dots over `rect`, every 20 diagram units (doubled while they would sit closer
+/// than 12 pixels), moving with the view.
+pub fn dot_grid(painter: &Painter, rect: egui::Rect, view: &View, dark: bool) {
+    let mut step = 20.0 * view.zoom;
+    let mut guard = 0;
+    while step < 12.0 && guard < 12 {
+        step *= 2.0;
+        guard += 1;
+    }
+    if !step.is_finite() || step < 1.0 {
+        return;
+    }
+    let dot = if dark { Color32::from_gray(70) } else { Color32::from_gray(205) };
+    let start_x = rect.min.x + (view.origin.x - rect.min.x).rem_euclid(step);
+    let start_y = rect.min.y + (view.origin.y - rect.min.y).rem_euclid(step);
+    let mut y = start_y;
+    while y <= rect.max.y {
+        let mut x = start_x;
+        while x <= rect.max.x {
+            painter.circle_filled(Pos2::new(x, y), 1.1, dot);
+            x += step;
+        }
+        y += step;
+    }
+}
+
 /// The egui family of a diagram font (registered at start-up for every font of the look).
 pub fn diagram_family(font: Font, bold: bool) -> FontFamily {
     FontFamily::Name(format!("d-{}{}", font.id(), if bold { "-b" } else { "" }).into())
@@ -74,12 +110,12 @@ fn flatten(cmds: &[PathCmd], view: &View) -> Vec<(Vec<Pos2>, bool)> {
     out
 }
 
-/// Draws every primitive of the scene.
-pub fn draw(painter: &Painter, scene: &Scene, view: &View) {
+/// Draws every primitive of the scene, with the colours turned for a dark screen when `dark`.
+pub fn draw(painter: &Painter, scene: &Scene, view: &View, dark: bool) {
     let z = view.zoom;
     for p in &scene.prims {
-        let fill = p.fill.filter(|c| c[3] > 0).map(col);
-        let stroke = p.stroke.filter(|c| c[3] > 0).map_or(Stroke::NONE, |c| Stroke::new((p.stroke_width * z).max(0.6), col(c)));
+        let fill = p.fill.filter(|c| c[3] > 0).map(|c| shade(c, dark));
+        let stroke = p.stroke.filter(|c| c[3] > 0).map_or(Stroke::NONE, |c| Stroke::new((p.stroke_width * z).max(0.6), shade(c, dark)));
         match &p.shape {
             PrimShape::Rect { x, y, w, h, r } => {
                 let rect = egui::Rect::from_min_size(view.to_screen((*x, *y)), Vec2::new(w * z, h * z));
@@ -139,7 +175,7 @@ pub fn draw(painter: &Painter, scene: &Scene, view: &View) {
                     Anchor::End => Align2::RIGHT_CENTER,
                 };
                 let pos = view.to_screen((*x, *y - size * 0.34));
-                painter.text(pos, align, text, FontId::new(size * z, family), fill.unwrap_or(Color32::BLACK));
+                painter.text(pos, align, text, FontId::new(size * z, family), fill.unwrap_or(shade([0, 0, 0, 255], dark)));
             }
         }
     }

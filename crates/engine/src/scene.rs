@@ -156,7 +156,7 @@ pub const DEFAULT_THEME: Theme = Theme {
 };
 
 fn hex(c: Color) -> String {
-    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+    crate::look::hex(c)
 }
 
 fn esc(s: &str) -> String {

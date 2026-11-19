@@ -88,5 +88,5 @@ Revisor independente, com testes de mutação. Corrigidos:
   (achado baixo da revisão, não reproduzido).
 - O arquivo de preferências com UTF-8 inválido é ignorado inteiro, e o app grava sem troca atômica.
 - `declared_size` lê o primeiro `<svg` do texto, mesmo dentro de um comentário de SVG externo.
-- Notas ligadas por `-.-` a nós dentro de grupos ficam numa fileira fora dos grupos, e os grupos
-  descem em escada (caso da versão de 104 linhas do fluxo do HyVox).
+- ~~Notas ligadas por `-.-` a nós dentro de grupos ficam numa fileira fora dos grupos, e os grupos
+  descem em escada.~~ Resolvido na 0.4.0 (`feat-notas-e-grupos.md`).
