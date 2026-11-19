@@ -346,7 +346,66 @@ fn place_label(path: &[P], hint: Option<P>, size: (f32, f32), nodes: &[Rect], fr
     candidates.iter().copied().find(|p| free(&rect_at(*p))).or_else(|| candidates.first().copied())
 }
 
+/// Space between a node and the notes beside it.
+const NOTE_GAP: f32 = 28.0;
+
+/// Notes: a loose node (in no group) with a single unlabelled link, without arrow heads, to a node
+/// inside a group. Such a node is a remark about that node (`X -.- B`), so it is drawn beside it,
+/// inside its group. A node with a loop on itself takes no notes (the loop sits where they would).
+/// Returns, for every node, the node it is a note of.
+fn attached_notes(fc: &Flowchart) -> Vec<Option<usize>> {
+    let n = fc.nodes.len();
+    let mut degree = vec![0usize; n];
+    for e in &fc.edges {
+        for id in [&e.from, &e.to] {
+            if let Some(d) = fc.node_index(id).and_then(|i| degree.get_mut(i)) {
+                *d += 1;
+            }
+        }
+    }
+    let looped: Vec<bool> = (0..n).map(|i| fc.edges.iter().any(|e| e.from == e.to && fc.node_index(&e.from) == Some(i))).collect();
+    let mut note_of: Vec<Option<usize>> = vec![None; n];
+    for e in &fc.edges {
+        let headless = e.kind.head_start == Head::None && e.kind.head_end == Head::None && e.kind.style != LineStyle::Invisible;
+        let labelled = e.label.as_deref().is_some_and(|l| !l.trim().is_empty());
+        let (Some(a), Some(b)) = (fc.node_index(&e.from), fc.node_index(&e.to)) else { continue };
+        if !headless || labelled || a == b {
+            continue;
+        }
+        let parent = |i: usize| fc.nodes.get(i).and_then(|x| x.parent);
+        for (note, target) in [(a, b), (b, a)] {
+            // A note has one link, so its target can never be a note too.
+            if degree.get(note) == Some(&1) && parent(note).is_none() && parent(target).is_some() && !looped.get(target).copied().unwrap_or(false) {
+                if let Some(slot) = note_of.get_mut(note) {
+                    *slot = Some(target);
+                }
+                break;
+            }
+        }
+    }
+    note_of
+}
+
 pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
+    // Notes join the group of the node they describe.
+    let note_of = attached_notes(fc);
+    let adjusted;
+    let fc = if note_of.iter().any(Option::is_some) {
+        let mut f = fc.clone();
+        for (i, target) in note_of.iter().enumerate() {
+            if let Some(t) = target {
+                let parent = fc.nodes.get(*t).and_then(|x| x.parent);
+                if let Some(node) = f.nodes.get_mut(i) {
+                    node.parent = parent;
+                }
+            }
+        }
+        adjusted = f;
+        &adjusted
+    } else {
+        fc
+    };
+    let is_note = |i: usize| note_of.get(i).is_some_and(Option::is_some);
     let t = &DEFAULT_THEME;
     let nn = fc.nodes.len();
     let ns = fc.subgraphs.len();
@@ -360,8 +419,15 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     let mut members: Vec<Vec<Item>> = vec![Vec::new(); ns + 1];
     for (i, n) in fc.nodes.iter().enumerate() {
         let lvl = n.parent.map_or(0, |p| p + 1);
-        if let Some(m) = members.get_mut(lvl) {
+        if let (Some(m), false) = (members.get_mut(lvl), is_note(i)) {
             m.push(Item::Node(i));
+        }
+    }
+    // The notes of each node, in order.
+    let mut notes_on: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, target) in note_of.iter().enumerate() {
+        if let Some(t) = target {
+            notes_on.entry(*t).or_default().push(i);
         }
     }
     for (i, s) in fc.subgraphs.iter().enumerate() {
@@ -374,7 +440,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     let mut level_edges: Vec<Vec<(usize, Item, Item)>> = vec![Vec::new(); ns + 1];
     for (ei, e) in fc.edges.iter().enumerate() {
         let (Some(a), Some(b)) = (endpoint(fc, &e.from), endpoint(fc, &e.to)) else { continue };
-        if a == b {
+        if a == b || matches!(a, Item::Node(n) if is_note(n)) || matches!(b, Item::Node(n) if is_note(n)) {
             continue;
         }
         let (pa, pb) = (path_of(fc, a), path_of(fc, b));
@@ -412,6 +478,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         }
     }
 
+    let level_dir = |lvl: usize| if lvl == 0 { fc.direction } else { eff_dir.get(lvl - 1).copied().unwrap_or(fc.direction) };
     let mut sub_size: Vec<(f32, f32)> = vec![(0.0, 0.0); ns];
     let mut sub_title_h: Vec<f32> = vec![0.0; ns];
     let mut sub_inner: Vec<(f32, f32)> = vec![(0.0, 0.0); ns];
@@ -428,11 +495,24 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             .map(|it| match it {
                 Item::Node(n) => {
                     let (w, h) = node_sizes.get(*n).copied().unwrap_or((50.0, 38.0));
-                    LItem { w, h }
+                    let notes = notes_on.get(n).map(Vec::as_slice).unwrap_or(&[]);
+                    if notes.is_empty() {
+                        return LItem::new(w, h);
+                    }
+                    // Room beside the node for its notes, stacked along the flow.
+                    let sizes: Vec<(f32, f32)> = notes.iter().map(|k| node_sizes.get(*k).copied().unwrap_or((50.0, 38.0))).collect();
+                    let gaps = NOTE_GAP * 0.5 * (sizes.len() as f32 - 1.0);
+                    if level_dir(lvl).horizontal() {
+                        let along: f32 = sizes.iter().map(|s| s.0).sum::<f32>() + gaps;
+                        LItem { w: w.max(along), h, side: NOTE_GAP + sizes.iter().map(|s| s.1).fold(0.0, f32::max) }
+                    } else {
+                        let along: f32 = sizes.iter().map(|s| s.1).sum::<f32>() + gaps;
+                        LItem { w, h: h.max(along), side: NOTE_GAP + sizes.iter().map(|s| s.0).fold(0.0, f32::max) }
+                    }
                 }
                 Item::Sub(s) => {
                     let (w, h) = sub_size.get(*s).copied().unwrap_or((50.0, 38.0));
-                    LItem { w, h }
+                    LItem::new(w, h)
                 }
             })
             .collect();
@@ -448,8 +528,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             ledges.push(LEdge { from: *ia, to: *ib, min_len, label });
             flow_idx.push(*ei);
         }
-        let dir = if lvl == 0 { fc.direction } else { eff_dir.get(lvl - 1).copied().unwrap_or(fc.direction) };
-        let layout = layered(&litems, &ledges, dir, Spacing::default());
+        let layout = layered(&litems, &ledges, level_dir(lvl), Spacing::default());
         if lvl > 0 {
             let s = lvl - 1;
             let title = fc.subgraphs.get(s).map(|x| x.title.as_str()).unwrap_or("");
@@ -509,6 +588,68 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         }
     }
 
+    // Notes beside their node: right of it in a vertical flow, below it in a horizontal one.
+    for (target, notes) in &notes_on {
+        // Beside the node where it ends up, its own hand offset included.
+        let own = fc.nodes.get(*target).and_then(|x| fc.offsets.get(&x.id)).copied().unwrap_or((0.0, 0.0));
+        let c = node_c.get(*target).map_or((0.0, 0.0), |c| (c.0 + own.0, c.1 + own.1));
+        let (tw, th) = node_sizes.get(*target).copied().unwrap_or((0.0, 0.0));
+        let lvl = fc.nodes.get(*target).and_then(|x| x.parent).map_or(0, |p| p + 1);
+        let horizontal = level_dir(lvl).horizontal();
+        let sizes: Vec<(f32, f32)> = notes.iter().map(|k| node_sizes.get(*k).copied().unwrap_or((50.0, 38.0))).collect();
+        let gap = NOTE_GAP * 0.5;
+        let total: f32 = sizes.iter().map(|s| if horizontal { s.0 } else { s.1 }).sum::<f32>() + gap * (sizes.len() as f32 - 1.0);
+        let mut cursor = if horizontal { c.0 } else { c.1 } - total / 2.0;
+        for (k, (w, h)) in notes.iter().zip(&sizes) {
+            let p = if horizontal {
+                let p = (cursor + w / 2.0, c.1 + th / 2.0 + NOTE_GAP + h / 2.0);
+                cursor += w + gap;
+                p
+            } else {
+                let p = (c.0 + tw / 2.0 + NOTE_GAP + w / 2.0, cursor + h / 2.0);
+                cursor += h + gap;
+                p
+            };
+            if let Some(slot) = node_c.get_mut(*k) {
+                *slot = p;
+            }
+        }
+    }
+
+    // Groups the person moved: the frame and everything inside go along.
+    let own_group: Vec<P> = fc.subgraphs.iter().map(|sg| fc.offsets.get(&crate::flowchart::group_offset_key(&sg.id)).copied().unwrap_or((0.0, 0.0))).collect();
+    let cum_group: Vec<P> = (0..ns)
+        .map(|s| {
+            let mut acc = (0.0, 0.0);
+            for it in path_of(fc, Item::Sub(s)) {
+                if let Item::Sub(k) = it {
+                    let o = own_group.get(k).copied().unwrap_or((0.0, 0.0));
+                    acc = (acc.0 + o.0, acc.1 + o.1);
+                }
+            }
+            acc
+        })
+        .collect();
+    if cum_group.iter().any(|o| o.0 != 0.0 || o.1 != 0.0) {
+        for (s, o) in cum_group.iter().enumerate() {
+            if let Some(b) = sub_box.get_mut(s) {
+                b.x += o.0;
+                b.y += o.1;
+            }
+            if let Some(Some(l)) = levels.get_mut(s + 1) {
+                l.origin = (l.origin.0 + o.0, l.origin.1 + o.1);
+            }
+        }
+        for (i, n) in fc.nodes.iter().enumerate() {
+            if let (Some(p), Some(c)) = (n.parent, node_c.get_mut(i)) {
+                let o = cum_group.get(p).copied().unwrap_or((0.0, 0.0));
+                c.0 += o.0;
+                c.1 += o.1;
+            }
+        }
+    }
+    let group_moved = |s: usize| own_group.get(s).is_some_and(|o| o.0 != 0.0 || o.1 != 0.0);
+
     // Nodes the person moved by hand.
     let moved_node: Vec<bool> = fc.nodes.iter().map(|n| fc.offsets.get(&n.id).is_some_and(|o| o.0 != 0.0 || o.1 != 0.0)).collect();
     for (i, n) in fc.nodes.iter().enumerate() {
@@ -517,17 +658,22 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             c.1 += dy;
         }
     }
+    // Something inside group s moved relative to it: a node, or a group within it.
+    let inner_moved = |s: usize| -> bool {
+        fc.nodes.iter().enumerate().any(|(i, _)| moved_node.get(i).copied().unwrap_or(false) && path_of(fc, Item::Node(i)).contains(&Item::Sub(s)))
+            || (0..ns).any(|k| k != s && group_moved(k) && path_of(fc, Item::Sub(k)).contains(&Item::Sub(s)))
+    };
     let item_moved = |it: Item| -> bool {
         match it {
             Item::Node(n) => moved_node.get(n).copied().unwrap_or(false),
-            Item::Sub(s) => fc.nodes.iter().enumerate().any(|(i, _)| moved_node.get(i).copied().unwrap_or(false) && path_of(fc, Item::Node(i)).contains(&Item::Sub(s))),
+            Item::Sub(s) => group_moved(s) || inner_moved(s),
         }
     };
     // Frames grow to follow what was moved inside them (innermost first).
     let mut deepest_first: Vec<usize> = (0..ns).collect();
     deepest_first.sort_by_key(|s| std::cmp::Reverse(sub_depth(fc, *s)));
     for &s in &deepest_first {
-        if !item_moved(Item::Sub(s)) {
+        if !inner_moved(s) {
             continue;
         }
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
@@ -563,6 +709,7 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
 
     // ---- drawing ------------------------------------------------------------------------
     let mut scene = Scene { background: Some(t.background), font, ..Scene::default() };
+    scene.cluster_boxes = sub_box.clone();
     scene.node_boxes = (0..nn)
         .map(|i| {
             let (w, h) = node_sizes.get(i).copied().unwrap_or((0.0, 0.0));

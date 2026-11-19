@@ -483,6 +483,11 @@ fn parse_subgraph_header(rest: &str) -> (String, String) {
 /// Prefix of the comment that stores moved node positions.
 pub const LAYOUT_COMMENT: &str = "%% mermaidcraft:layout";
 
+/// Key of a moved subgraph in the layout comment: `sub:<id>`, so it never clashes with a node id.
+pub fn group_offset_key(id: &str) -> String {
+    format!("sub:{id}")
+}
+
 /// Reads ` A=12,-30 B=0,40`. Unknown or malformed entries are ignored.
 pub fn parse_offsets(s: &str) -> std::collections::BTreeMap<String, (f32, f32)> {
     let mut m = std::collections::BTreeMap::new();
