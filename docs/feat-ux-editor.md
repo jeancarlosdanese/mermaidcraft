@@ -86,11 +86,26 @@ Revisor independente. Corrigidos:
 
 ## Limites conhecidos
 
-- Duas instruções `style` do mesmo nó numa linha só (`style A fill:#fff; style A stroke:#000`)
-  deixam um `;` sobrando ao serem unidas.
 - Um valor com `;` ou `,` entre aspas numa linha `style` própria impede o painel de reescrevê-la (a
   troca é recusada com aviso).
-- O painel pode cobrir parte do diagrama no canto direito; o ajuste à janela não reserva espaço para
-  ele.
+- O painel ainda cobre o canto direito do diagrama quando nada embaixo dele está selecionado; o
+  ajuste à janela não reserva espaço para ele.
 - A interação com o mouse (clicar, arrastar, digitar no painel) foi conferida pelo código e pelas
   capturas, não com cliques de verdade.
+
+## Ajustes da 0.6.1
+
+- **`;` sobrando.** Ao unir duas instruções `style` do mesmo nó escritas numa linha só
+  (`style A fill:#fff; style A stroke:#000`), o `;` entre elas ficava para trás. Agora sai junto com
+  a instrução removida, seja o que vem depois dela, seja o que vem antes quando ela fecha a linha
+  (`A --> B; style A ...`), mesmo com um comentário `%%` no fim; a linha some quando não sobra nada
+  nela. É a mesma limpeza que apagar um nó já usava (`clean_markers`), que passou a respeitar o
+  comentário no fim da linha.
+- **Painel sobre o nó selecionado.** Um nó ou seta selecionado embaixo do painel de estilo faz a
+  vista deslizar para a esquerda até ele ficar visível, a 16 px da borda do painel, sem passar da
+  borda esquerda do canvas. Acontece uma vez por seleção, nunca durante um arraste nem enquanto se
+  digita (no texto, cada letra de um id é uma seleção nova); depois disso a vista não volta sozinha
+  ("Ajustar à janela" refaz o enquadramento). Seleções que já estão à vista não mexem em nada.
+- Revisão independente: a primeira versão tinha uma segunda rotina de limpeza do `;` (trocada pela
+  que já existia), media o painel no quadro em que ele ainda era só estimado e deslizava aos trancos
+  enquanto se digitava um id no texto. Corrigidos.

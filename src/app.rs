@@ -106,6 +106,9 @@ pub struct App {
     /// Where the canvas is, for the floating tools, and how tall the tool bar came out.
     canvas_rect: Option<egui::Rect>,
     tools_h: f32,
+    /// Where the style panel is in this frame, and the selection last moved out from under it.
+    inspector_rect: Option<egui::Rect>,
+    revealed: Sel,
 }
 
 /// Lines of `new` (1-based, inclusive) that differ from `old`; for a pure deletion, the line where
@@ -248,6 +251,8 @@ impl App {
             cursor_byte: None,
             canvas_rect: None,
             tools_h: 40.0,
+            inspector_rect: None,
+            revealed: Sel::None,
         };
         let mut opened = false;
         for f in &opts.files {
@@ -1130,14 +1135,20 @@ impl App {
             });
         });
         self.tools_h = bar.response.rect.height();
+        self.inspector_rect = None;
         if self.flow().is_some() && self.sel != Sel::None {
             let panel = egui::Frame::popup(&ctx.global_style()).corner_radius(10.0).inner_margin(egui::Margin::same(12));
-            egui::Area::new(egui::Id::new("float_inspector")).fixed_pos(rect.right_top() + Vec2::new(-12.0, 10.0 + self.tools_h + 10.0)).pivot(egui::Align2::RIGHT_TOP).constrain_to(rect).show(ctx, |ui| {
+            let shown = egui::Area::new(egui::Id::new("float_inspector")).fixed_pos(rect.right_top() + Vec2::new(-12.0, 10.0 + self.tools_h + 10.0)).pivot(egui::Align2::RIGHT_TOP).constrain_to(rect).show(ctx, |ui| {
                 panel.show(ui, |ui| {
                     ui.set_width(236.0);
                     self.inspector(ui, now);
                 });
             });
+            // The first frame only measures the panel: its place is known from the next one.
+            let layer = shown.response.layer_id;
+            if ctx.memory(|m| m.areas().visible_last_frame(&layer)) {
+                self.inspector_rect = Some(shown.response.rect);
+            }
         }
     }
 
@@ -1350,6 +1361,31 @@ impl App {
                     self.pan += Vec2::new(scroll.x, 0.0);
                     self.auto_fit = false;
                 }
+            }
+        }
+        // A node or edge selected under the style panel slides left, out from under it (once per
+        // selection, never while dragging nor while typing: an id typed in the text is a new
+        // selection at every letter).
+        if self.drag.is_some() || ui.ctx().egui_wants_keyboard_input() {
+            self.revealed = self.sel.clone();
+        } else if self.sel != self.revealed {
+            let view = View { origin: rect.min + self.pan, zoom: self.zoom };
+            let target = self.flow().and_then(|flow| match &self.sel {
+                Sel::Node(id) => flow.node_index(id).and_then(|i| scene.node_boxes.get(i)).map(|b| egui::Rect::from_min_size(view.to_screen((b.x, b.y)), Vec2::new(b.w, b.h) * view.zoom)),
+                Sel::Edge(i) => scene.edge_paths.get(*i).and_then(|path| path.get(path.len() / 2)).map(|p| egui::Rect::from_center_size(view.to_screen(*p), Vec2::splat(24.0))),
+                Sel::None => None,
+            });
+            match (target, self.inspector_rect) {
+                (Some(target), Some(panel)) => {
+                    let dx = reveal_shift(target, panel, rect);
+                    if dx != 0.0 {
+                        self.pan.x += dx;
+                        self.auto_fit = false;
+                    }
+                    self.revealed = self.sel.clone();
+                }
+                (Some(_), None) => ui.ctx().request_repaint(),
+                (None, _) => self.revealed = self.sel.clone(),
             }
         }
         let view = View { origin: rect.min + self.pan, zoom: self.zoom };
@@ -1668,9 +1704,37 @@ impl eframe::App for App {
     }
 }
 
+/// How far to move the view (negative is left) so `target` is no longer under `panel`, keeping its
+/// left edge inside the canvas. Zero when they do not overlap.
+fn reveal_shift(target: egui::Rect, panel: egui::Rect, canvas: egui::Rect) -> f32 {
+    const GAP: f32 = 16.0;
+    if !target.intersects(panel) {
+        return 0.0;
+    }
+    let need = target.max.x - (panel.min.x - GAP);
+    let room = target.min.x - (canvas.min.x + GAP);
+    -need.min(room).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::changed_lines;
+    use super::{changed_lines, reveal_shift};
+    use eframe::egui::{pos2, Rect};
+
+    #[test]
+    fn a_node_under_the_panel_slides_left_of_it() {
+        let canvas = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 600.0));
+        let panel = Rect::from_min_max(pos2(528.0, 60.0), pos2(788.0, 400.0));
+        // Under the panel: its right edge ends 16 px left of the panel.
+        let node = Rect::from_min_max(pos2(600.0, 100.0), pos2(700.0, 140.0));
+        assert_eq!(reveal_shift(node, panel, canvas), -(700.0 - 512.0));
+        // Below the panel, or clear of it: nothing moves.
+        assert_eq!(reveal_shift(node.translate(eframe::egui::vec2(0.0, 400.0)), panel, canvas), 0.0);
+        assert_eq!(reveal_shift(node.translate(eframe::egui::vec2(-300.0, 0.0)), panel, canvas), 0.0);
+        // A node wider than the room left keeps its left edge on the canvas.
+        let wide = Rect::from_min_max(pos2(100.0, 100.0), pos2(700.0, 140.0));
+        assert_eq!(reveal_shift(wide, panel, canvas), -84.0);
+    }
 
     #[test]
     fn app_version_matches_the_workspace() {

@@ -563,6 +563,16 @@ fn node_style_is_written_replaced_and_removed() {
     let crlf = "flowchart TD\r\n  A --> B\r\n  style A fill:#fff\r\n  style A stroke:#000\r\n";
     let out4 = edit::set_node_style(crlf, "A", &props(&[("fill", "#eee")])).unwrap();
     assert_eq!(out4, "flowchart TD\r\n  A --> B\r\n  style A fill:#eee\r\n");
+    // Several statements on one line: the `;` between them goes with the removed ones.
+    let fill = props(&[("fill", "#eee")]);
+    let both = "flowchart TD\n  A --> B\n  style A fill:#fff; style A stroke:#000\n";
+    assert_eq!(edit::set_node_style(both, "A", &fill).unwrap(), "flowchart TD\n  A --> B\n  style A fill:#eee\n");
+    let tail = "flowchart TD\n  A --> B; style A fill:#fff\n  style A stroke:#000\n";
+    assert_eq!(edit::set_node_style(tail, "A", &fill).unwrap(), "flowchart TD\n  A --> B\n  style A fill:#eee\n");
+    let around = "flowchart TD\n  style A fill:#fff; C --> D; style A stroke:#000\n  A --> B\n";
+    assert_eq!(edit::set_node_style(around, "A", &fill).unwrap(), "flowchart TD\n  C --> D\n  A --> B\n  style A fill:#eee\n");
+    let noted = "flowchart TD\n  C --> D; style A fill:#fff %% nota\n  A --> B\n  style A stroke:#000\n";
+    assert_eq!(edit::set_node_style(noted, "A", &fill).unwrap(), "flowchart TD\n  C --> D %% nota\n  A --> B\n  style A fill:#eee\n");
     // Bad input is refused.
     assert!(edit::set_node_style(src, "Z", &StyleMap::new()).is_err());
     assert!(edit::set_node_style(src, "A", &props(&[("fill", "#fff;evil")])).is_err());
