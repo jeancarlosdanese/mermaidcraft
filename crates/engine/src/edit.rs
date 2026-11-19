@@ -282,19 +282,27 @@ fn clean_markers(s: &str) -> String {
         }
         let ending = if raw.ends_with("\r\n") { "\r\n" } else if raw.ends_with('\n') { "\n" } else { "" };
         let body = raw.trim_end_matches(['\r', '\n']);
-        let mut cleaned = body.replace('\u{0}', "");
+        let whole = body.replace('\u{0}', "");
+        // A `%%` comment at the end of the line stays; the separators are cleaned before it.
+        let code_len = strip_comment(&whole).len();
+        let (code, comment) = (whole.get(..code_len).unwrap_or(""), whole.get(code_len..).unwrap_or("").trim());
+        let mut cleaned = code.to_string();
         // Separators left behind: `; ;`, a leading or trailing `;`.
         while cleaned.contains(";;") || cleaned.contains("; ;") {
             cleaned = cleaned.replace("; ;", ";").replace(";;", ";");
         }
         let trimmed = cleaned.trim();
         let trimmed = trimmed.trim_start_matches(';').trim_end_matches(';').trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && comment.is_empty() {
             continue;
         }
-        let indent: String = cleaned.chars().take_while(|c| c.is_whitespace()).collect();
+        let indent: String = whole.chars().take_while(|c| c.is_whitespace()).collect();
         out.push_str(&indent);
         out.push_str(trimmed);
+        if !trimmed.is_empty() && !comment.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(comment);
         out.push_str(ending);
     }
     out
@@ -343,16 +351,6 @@ pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Optio
     let (from, to) = (e.from.clone(), e.to.clone());
     let removed = remove_edge(src, edge)?;
     Ok(append_line(&removed, &format!("{from} {token} {to}")))
-}
-
-/// The span of a statement grown to its whole line (with the line break) when nothing else is on
-/// that line, so removing it leaves no blank line behind.
-fn whole_line(src: &str, span: Span) -> Span {
-    let start = src.get(..span.start).and_then(|b| b.rfind('\n')).map_or(0, |i| i + 1);
-    let end = src.get(span.end..).and_then(|a| a.find('\n')).map_or(src.len(), |i| span.end + i + 1);
-    let before = src.get(start..span.start).unwrap_or("x");
-    let after = src.get(span.end..end).unwrap_or("x");
-    if before.trim().is_empty() && after.trim().trim_start_matches(';').trim().is_empty() { Span::new(start, end) } else { span }
 }
 
 /// The `style` statements that style this node alone (`style A ...`, not `style A,B ...`).
@@ -412,7 +410,7 @@ pub fn set_node_style(src: &str, id: &str, props: &StyleMap) -> Result<String, E
             return apply(src, vec![(only.span, line)]);
         }
     }
-    let out = apply(src, own.iter().map(|st| (whole_line(src, st.span), String::new())).collect())?;
+    let out = clean_markers(&apply(src, own.iter().map(|st| (st.span, "\u{0}".to_string())).collect())?);
     if props.is_empty() { Ok(out) } else { Ok(insert_line(&out, &line)) }
 }
 
