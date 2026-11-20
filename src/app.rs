@@ -211,7 +211,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: Options) -> Self {
         setup_fonts(&cc.egui_ctx);
         let shot_mode = opts.screenshot.is_some();
-        let settings = if shot_mode { Settings::fresh() } else { Settings::load() };
+        // Tests start from the defaults, never from the person's preferences.
+        let settings = if shot_mode || cfg!(test) { Settings::fresh() } else { Settings::load() };
         opts.events.set_wake(&cc.egui_ctx);
         let mut app = App {
             lang: settings.lang,
@@ -1375,7 +1376,11 @@ impl App {
                 Sel::Edge(i) => scene.edge_paths.get(*i).and_then(|path| path.get(path.len() / 2)).map(|p| egui::Rect::from_center_size(view.to_screen(*p), Vec2::splat(24.0))),
                 Sel::None => None,
             });
+            // A click may still be the first half of a double-click (which opens the label): sliding
+            // now would put the node away from the second click. egui's window is 0.3 s.
+            let settling = ui.input(|i| i.pointer.any_down() || i.pointer.time_since_last_click() < 0.35);
             match (target, self.inspector_rect) {
+                (Some(_), Some(_)) if settling => ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)),
                 (Some(target), Some(panel)) => {
                     let dx = reveal_shift(target, panel, rect);
                     if dx != 0.0 {
@@ -1516,13 +1521,15 @@ impl App {
             }
         }
         if resp.drag_stopped() {
-            if let Some(Drag::Move { id, offset, group }) = self.drag.take() {
+            // The drag is taken once: a link drag must not be dropped by the check for a move.
+            let ended = self.drag.take();
+            if let Some(Drag::Move { id, offset, group }) = ended {
                 self.commit_offset(&id, offset, now);
                 let m = self.tr(if group { "Moved a group" } else { "Moved a node" }).to_string();
                 self.flash(m, now);
                 return;
             }
-            if let (Some(Drag::Link { from }), Some(p)) = (self.drag.take(), ui.input(|i| i.pointer.interact_pos())) {
+            if let (Some(Drag::Link { from }), Some(p)) = (ended, ui.input(|i| i.pointer.interact_pos())) {
                 let moved = scene.node_boxes.get(from).is_some_and(|b| {
                     let c = view.to_screen(b.center());
                     (p - c).length() > 20.0 * view.zoom
@@ -1756,5 +1763,142 @@ mod tests {
         // A pure deletion marks where the text went.
         assert_eq!(changed_lines(base, "flowchart TD\n  B --> C\n"), Some((2, 2)));
         assert_eq!(changed_lines(base, base), None);
+    }
+}
+
+/// Mouse gestures on the canvas, run frame by frame without a window.
+#[cfg(test)]
+mod gestures {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        frame: eframe::Frame,
+        t: f64,
+    }
+
+    impl Harness {
+        fn new(text: &str) -> Harness {
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut app = App::new(&cc, Options { screenshot: None, files: Vec::new(), events: crate::platform::OpenEvents::none() });
+            app.set_doc(text.to_string(), None, None);
+            let mut h = Harness { ctx, app, frame: eframe::Frame::_new_kittest(), t: 0.0 };
+            for _ in 0..4 {
+                h.step(Vec::new(), Modifiers::NONE);
+            }
+            h
+        }
+
+        fn step(&mut self, events: Vec<Event>, m: Modifiers) {
+            self.t += 0.05;
+            let events = std::iter::once(Event::ModifiersChanged(m)).chain(events).collect();
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0))), time: Some(self.t), focused: true, events, ..Default::default() };
+            let (app, frame) = (&mut self.app, &mut self.frame);
+            let mut out = self.ctx.run_ui(input, |ui| eframe::App::ui(app, ui, frame));
+            out.textures_delta.clear();
+        }
+
+        /// Centre of a node on the screen.
+        fn node(&self, id: &str) -> Pos2 {
+            let i = self.app.flow().and_then(|f| f.node_index(id)).expect("node");
+            let b = self.app.scene.as_ref().and_then(|s| s.node_boxes.get(i).copied()).expect("box");
+            let o = self.app.canvas_rect.expect("canvas").min + self.app.pan;
+            Pos2::new(o.x + (b.x + b.w / 2.0) * self.app.zoom, o.y + (b.y + b.h / 2.0) * self.app.zoom)
+        }
+
+        fn button(&mut self, p: Pos2, down: bool, m: Modifiers) {
+            self.step(vec![Event::PointerMoved(p), Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: m }], m);
+        }
+
+        fn click(&mut self, p: Pos2) {
+            self.step(vec![Event::PointerMoved(p)], Modifiers::NONE);
+            self.button(p, true, Modifiers::NONE);
+            self.button(p, false, Modifiers::NONE);
+            self.step(Vec::new(), Modifiers::NONE);
+        }
+
+        fn drag(&mut self, a: Pos2, b: Pos2, m: Modifiers) {
+            self.step(vec![Event::PointerMoved(a)], m);
+            self.button(a, true, m);
+            for k in 1..=10 {
+                self.step(vec![Event::PointerMoved(a + (b - a) * (k as f32 / 10.0))], m);
+            }
+            self.button(b, false, m);
+            self.step(Vec::new(), m);
+        }
+
+        /// Lets the double-click window pass.
+        fn wait(&mut self) {
+            for _ in 0..10 {
+                self.step(Vec::new(), Modifiers::NONE);
+            }
+        }
+    }
+
+    const SRC: &str = "flowchart TD\n  A[Um] --> B[Dois]\n  C[Tres]\n";
+
+    #[test]
+    fn click_selects_and_the_link_tool_connects() {
+        let mut h = Harness::new(SRC);
+        let c = h.node("C");
+        h.click(c);
+        assert_eq!(h.app.sel, Sel::Node("C".into()));
+        h.wait();
+        h.app.tool = Tool::Link;
+        let (a, c) = (h.node("A"), h.node("C"));
+        h.click(a);
+        h.click(c);
+        assert!(h.app.text.contains("  A --> C\n"), "{}", h.app.text);
+    }
+
+    #[test]
+    fn shift_drag_links_to_a_node_or_to_a_new_one() {
+        // The move check used to take the drag, so a link drag was always lost on release.
+        let mut h = Harness::new(SRC);
+        let (a, c) = (h.node("A"), h.node("C"));
+        h.drag(a, c, Modifiers::SHIFT);
+        assert!(h.app.text.contains("  A --> C\n"), "{}", h.app.text);
+        let mut h = Harness::new(SRC);
+        let a = h.node("A");
+        h.drag(a, a + egui::vec2(-250.0, 200.0), Modifiers::SHIFT);
+        assert!(h.app.text.ends_with("  D[Novo nó]\n  A --> D\n") || h.app.text.ends_with("  D[New node]\n  A --> D\n"), "{}", h.app.text);
+    }
+
+    #[test]
+    fn dragging_a_node_keeps_its_place() {
+        let mut h = Harness::new(SRC);
+        let a = h.node("A");
+        h.drag(a, a + egui::vec2(60.0, 0.0), Modifiers::NONE);
+        assert!(h.app.text.contains("%% mermaidcraft:layout A="), "{}", h.app.text);
+    }
+
+    #[test]
+    fn double_click_opens_the_label_even_beside_the_panel() {
+        // C sits by the style panel: the view must not slide between the two clicks.
+        let mut h = Harness::new(SRC);
+        let c = h.node("C");
+        h.click(c);
+        h.click(c);
+        assert!(App::label_focused(&h.ctx), "the label box should have the keyboard");
+        h.step(vec![Event::Text("X".into())], Modifiers::NONE);
+        let away = h.node("B") + egui::vec2(-300.0, 150.0);
+        h.click(away);
+        assert!(h.app.text.contains("  C[X]\n"), "{}", h.app.text);
+    }
+
+    #[test]
+    fn a_new_node_takes_the_typed_label() {
+        let mut h = Harness::new(SRC);
+        let t = h.t;
+        h.app.add_node(t);
+        h.step(Vec::new(), Modifiers::NONE);
+        h.step(Vec::new(), Modifiers::NONE);
+        h.step(vec![Event::Text("Pagar".into())], Modifiers::NONE);
+        let away = h.node("A") + egui::vec2(-250.0, 250.0);
+        h.click(away);
+        assert!(h.app.text.ends_with("  D[Pagar]\n"), "{}", h.app.text);
     }
 }
