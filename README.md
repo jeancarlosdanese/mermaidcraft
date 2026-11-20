@@ -18,10 +18,16 @@ continua sendo Mermaid puro, que abre em qualquer lugar.
 - **Edição pelo desenho**: criar e ligar nós, trocar rótulo, forma, cor e contorno num painel de
   estilo, arrastar nós e grupos inteiros (pela faixa do título). Cada mudança é um passo de
   desfazer, e a linha alterada no texto pisca.
+- **Menu de botão direito**: sobre um nó, renomear, forma, cor, contorno, ligar a outro nó, criar
+  um nó já ligado e apagar; sobre uma seta, rótulo, linha, ponta, inverter o sentido e apagar; no
+  espaço vazio, criar um nó no ponto clicado, organizar, ajustar à janela e trocar a direção.
+  F2 ou Enter abrem o rótulo do selecionado, e Delete apaga.
 - **Texto e desenho ligados**: selecionar um nó mostra a linha dele; pôr o cursor numa linha
   seleciona o nó.
 - **Tema escuro**, inclusive no desenho. Os arquivos exportados continuam claros.
 - **Exporta** SVG, PNG e PDF, e lê os blocos ` ```mermaid ` de arquivos Markdown.
+
+![Menu de botão direito sobre um nó](docs/img/menu-contexto.png)
 
 ![Editor no tema escuro](docs/img/editor-escuro.png)
 

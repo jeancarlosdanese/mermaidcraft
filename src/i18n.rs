@@ -167,6 +167,12 @@ const PT: &[(&str, &str)] = &[
     ("Moved a node", "Nó movido"),
     ("Version", "Versão"),
     ("Drop a .mmd or .md file here to open it.", "Solte um arquivo .mmd ou .md aqui para abri-lo."),
+    ("Rename", "Renomear"),
+    ("Link to…", "Ligar a…"),
+    ("New linked node", "Novo nó ligado"),
+    ("Reverse direction", "Inverter sentido"),
+    ("New node here", "Novo nó aqui"),
+    ("Arrowhead", "Ponta"),
 ];
 
 /// Translates an English text.
