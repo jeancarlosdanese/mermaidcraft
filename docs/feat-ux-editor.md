@@ -1,6 +1,6 @@
 # FEAT: interface do editor (fase C)
 
-Estado: entregue na 0.5.0 (19/11/2026); ajustes na 0.6.1
+Estado: entregue na 0.5.0 (19/11/2026); ajustes na 0.6.1 e correções na 0.6.2
 
 ## Objetivo
 
