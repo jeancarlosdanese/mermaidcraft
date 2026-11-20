@@ -608,3 +608,75 @@ fn text_place_names_the_node_or_edge_under_it() {
     assert_eq!(at2("--> Z", 1, 6), None);
     assert_eq!(at2("Y -->", 0, 6), Some(edit::TextItem::Node("Y".into())));
 }
+
+#[test]
+fn edit_reverse_edge_alone_on_its_line() {
+    let src = "flowchart TD\n  A[Um] --> B[Dois]\n  C[Tres]\n";
+    let (s, e) = edit::reverse_edge(src, 0).unwrap();
+    assert_eq!(s, "flowchart TD\n  B[Dois] --> A[Um]\n  C[Tres]\n");
+    assert_eq!(e, 0);
+    let f = flow(&s);
+    assert_eq!((f.edges[0].from.as_str(), f.edges[0].to.as_str()), ("B", "A"));
+    assert_eq!(f.nodes.iter().find(|n| n.id == "A").unwrap().label, "Um");
+}
+
+#[test]
+fn edit_reverse_edge_in_a_chain_and_shared() {
+    let src = "flowchart TD\n  A --> B --> C\n";
+    let (s, e) = edit::reverse_edge(src, 1).unwrap();
+    let p = parse(&s);
+    assert!(!p.has_errors(), "{s} {:?}", p.diagnostics);
+    assert!(s.contains("A --> B\n"), "{s}");
+    assert!(s.contains("C --> B\n"), "{s}");
+    let f = flow(&s);
+    assert_eq!(f.edges.len(), 2);
+    assert_eq!((f.edges[e].from.as_str(), f.edges[e].to.as_str()), ("C", "B"));
+    assert!(f.edges.iter().any(|x| x.from == "A" && x.to == "B"));
+
+    let src = "flowchart TD\n  A & B --> C\n";
+    let (s, e) = edit::reverse_edge(src, 0).unwrap();
+    let f = flow(&s);
+    assert_eq!(f.edges.len(), 2, "{s}");
+    assert_eq!((f.edges[e].from.as_str(), f.edges[e].to.as_str()), ("C", "A"));
+    assert!(f.edges.iter().any(|x| x.from == "B" && x.to == "C"), "{s}");
+}
+
+#[test]
+fn edit_reverse_edge_keeps_label_line_and_heads() {
+    let src = "flowchart TD\n  A x-.->|sim| B\n  C ---o D\n";
+    let before = flow(src);
+    let (s, _) = edit::reverse_edge(src, 0).unwrap();
+    let (s, _) = edit::reverse_edge(&s, 1).unwrap();
+    assert!(s.contains("B x-.->|sim| A"), "{s}");
+    assert!(s.contains("D ---o C"), "{s}");
+    let p = parse(&s);
+    assert!(!p.has_errors(), "{s} {:?}", p.diagnostics);
+    let f = flow(&s);
+    assert_eq!(f.edges[0].kind, before.edges[0].kind);
+    assert_eq!(f.edges[0].label.as_deref(), Some("sim"));
+    assert_eq!(f.edges[1].kind, before.edges[1].kind);
+}
+
+#[test]
+fn edit_reverse_edge_before_the_layout_comment() {
+    let src = "flowchart TD\n  A --> B --> C\n%% mermaidcraft:layout A=10,0\n";
+    let (s, _) = edit::reverse_edge(src, 0).unwrap();
+    assert!(s.ends_with("B --> A\n%% mermaidcraft:layout A=10,0\n"), "{s}");
+    let (same, e) = edit::reverse_edge("flowchart TD\n  A --> A\n", 0).unwrap();
+    assert_eq!((same.as_str(), e), ("flowchart TD\n  A --> A\n", 0));
+    assert!(edit::reverse_edge("flowchart TD\n  A --> B\n", 3).is_err());
+    assert!(edit::reverse_edge("sequenceDiagram\n  A->>B: x\n", 0).is_err());
+}
+
+#[test]
+fn edit_reverse_edge_finds_the_moved_edge_and_keeps_crlf() {
+    // An equal edge written after the layout comment is not the one that moved.
+    let src = "flowchart TD\n  A --> B --> C\n%% mermaidcraft:layout A=10,0\n  B --> A\n";
+    let (s, e) = edit::reverse_edge(src, 0).unwrap();
+    let f = flow(&s);
+    assert_eq!(f.edges.len(), 3, "{s}");
+    assert_eq!(f.edges[e].line, 4, "{s}");
+    // A chain split in a CRLF file keeps CRLF.
+    let (s, _) = edit::reverse_edge("flowchart TD\r\n  A --> B --> C\r\n", 1).unwrap();
+    assert!(!s.replace("\r\n", "").contains('\n'), "{s:?}");
+}

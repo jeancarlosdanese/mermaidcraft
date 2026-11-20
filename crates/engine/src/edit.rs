@@ -240,7 +240,8 @@ fn rebuild(src: &str, fc: &Flowchart, rm: &Removals) -> Result<String, EditError
                     "\u{0}".to_string()
                 } else {
                     let indent = line_indent(src, st.span.start);
-                    statements.join(&format!("\n{indent}"))
+                    let nl = if src.contains("\r\n") { "\r\n" } else { "\n" };
+                    statements.join(&format!("{nl}{indent}"))
                 };
                 edits.push((st.span, text));
             }
@@ -351,6 +352,47 @@ pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Optio
     let (from, to) = (e.from.clone(), e.to.clone());
     let removed = remove_edge(src, edge)?;
     Ok(append_line(&removed, &format!("{from} {token} {to}")))
+}
+
+/// Swaps the two ends of an edge and keeps its line as written: `A --> B` becomes `B --> A`,
+/// `A x--> B` becomes `B x--> A`. Mermaid has no head on the start alone (`B <-- A` is an error),
+/// so the heads are not swapped. A link alone on its statement is turned in place, with the node
+/// definitions (`A[One] --> B[Two]` becomes `B[Two] --> A[One]`); a link of a chain or a shared
+/// one (`A & B --> C`) moves to its own line. Returns the new text and the edge's new number.
+pub fn reverse_edge(src: &str, edge: usize) -> Result<(String, usize), EditError> {
+    let fc = load(src)?;
+    let e = fc.edges.get(edge).ok_or(EditError::NoSuchEdge(edge))?;
+    if e.from == e.to {
+        return Ok((src.to_string(), edge));
+    }
+    let Some(Stmt { kind: StmtKind::Chain { groups, links }, .. }) = fc.statements.get(e.stmt) else {
+        return Err(EditError::NoSuchEdge(edge));
+    };
+    let link = links.get(e.link).ok_or(EditError::NoSuchEdge(edge))?;
+    let text_of = |s: Span| src.get(s.start..s.end).unwrap_or("").to_string();
+    let alone = |i: usize| groups.get(i).and_then(|g| if let [only] = g.nodes.as_slice() { Some(only) } else { None });
+    if let (2, Some(a), Some(b)) = (groups.len(), alone(0), alone(1)) {
+        let out = apply(src, vec![(a.span, text_of(b.span)), (b.span, text_of(a.span))])?;
+        return Ok((out, edge));
+    }
+    let token = text_of(link.span);
+    let (from, to) = (e.from.clone(), e.to.clone());
+    let removed = remove_edge(src, edge)?;
+    // The new line goes where `insert_line` puts it: before the layout comment, else at the end.
+    let mut at = removed.trim_end_matches([' ', '\t']).len();
+    let mut seen = 0usize;
+    for raw in removed.split_inclusive('\n') {
+        if raw.trim_start().starts_with(flowchart::LAYOUT_COMMENT) {
+            at = seen;
+            break;
+        }
+        seen += raw.len();
+    }
+    let out = insert_line(&removed, &format!("{to} {token} {from}"));
+    let fc = load(&out)?;
+    let starts_after = |x: &FlowEdge| fc.statements.get(x.stmt).is_some_and(|st| st.span.start >= at);
+    let index = fc.edges.iter().position(|x| x.from == to && x.to == from && starts_after(x)).ok_or(EditError::NoSuchEdge(edge))?;
+    Ok((out, index))
 }
 
 /// The `style` statements that style this node alone (`style A ...`, not `style A,B ...`).
