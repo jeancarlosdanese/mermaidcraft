@@ -1,6 +1,6 @@
 # FEAT: menu de botão direito no canvas
 
-Estado: implementada na branch `feat/menu-contexto`, aguardando revisão do Jean (0.7.0)
+Estado: entregue na 0.7.0 (20/11/2026)
 
 ## Problema
 
