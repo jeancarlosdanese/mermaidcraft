@@ -327,7 +327,7 @@ fn clean_markers(s: &str) -> String {
     out
 }
 
-pub fn remove_node(src: &str, id: &str) -> Result<String, EditError> {
+fn remove_node_raw(src: &str, id: &str) -> Result<String, EditError> {
     let fc = load(src)?;
     if fc.node_index(id).is_none() {
         return Err(EditError::NoSuchNode(id.to_string()));
@@ -337,7 +337,7 @@ pub fn remove_node(src: &str, id: &str) -> Result<String, EditError> {
     rebuild(src, &fc, &rm)
 }
 
-pub fn remove_edge(src: &str, edge: usize) -> Result<String, EditError> {
+fn remove_edge_raw(src: &str, edge: usize) -> Result<String, EditError> {
     let fc = load(src)?;
     if edge >= fc.edges.len() {
         return Err(EditError::NoSuchEdge(edge));
@@ -348,7 +348,7 @@ pub fn remove_edge(src: &str, edge: usize) -> Result<String, EditError> {
 }
 
 /// Changes the label (`Some(None)` clears it) and/or the kind of an edge.
-pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Option<LinkKind>) -> Result<String, EditError> {
+fn set_edge_raw(src: &str, edge: usize, label: Option<Option<&str>>, kind: Option<LinkKind>) -> Result<String, EditError> {
     let fc = load(src)?;
     let e = fc.edges.get(edge).ok_or(EditError::NoSuchEdge(edge))?;
     let new_label: Option<String> = match label {
@@ -368,7 +368,7 @@ pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Optio
     }
     // The link is shared by several edges (`A & B --> C`): move this edge to its own line.
     let (from, to) = (e.from.clone(), e.to.clone());
-    let removed = remove_edge(src, edge)?;
+    let removed = remove_edge_raw(src, edge)?;
     Ok(append_line(&removed, &format!("{from} {token} {to}")))
 }
 
@@ -377,7 +377,7 @@ pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Optio
 /// so the heads are not swapped. A link alone on its statement is turned in place, with the node
 /// definitions (`A[One] --> B[Two]` becomes `B[Two] --> A[One]`); a link of a chain or a shared
 /// one (`A & B --> C`) moves to its own line. Returns the new text and the edge's new number.
-pub fn reverse_edge(src: &str, edge: usize) -> Result<(String, usize), EditError> {
+fn reverse_edge_raw(src: &str, edge: usize) -> Result<(String, usize), EditError> {
     let fc = load(src)?;
     let e = fc.edges.get(edge).ok_or(EditError::NoSuchEdge(edge))?;
     if e.from == e.to {
@@ -395,7 +395,7 @@ pub fn reverse_edge(src: &str, edge: usize) -> Result<(String, usize), EditError
     }
     let token = text_of(link.span);
     let (from, to) = (e.from.clone(), e.to.clone());
-    let removed = remove_edge(src, edge)?;
+    let removed = remove_edge_raw(src, edge)?;
     // The new line goes where `insert_line` puts it: before the layout comment, else at the end.
     let mut at = removed.trim_end_matches([' ', '\t']).len();
     let mut seen = 0usize;
@@ -510,7 +510,12 @@ fn base_indent(src: &str, fc: &Flowchart, owners: &[Option<usize>]) -> String {
     loose.or_else(|| fc.statements.iter().enumerate().next()).map_or_else(|| "    ".to_string(), |(_, st)| line_indent(src, st.span.start))
 }
 
+/// The group named `id`. Two groups with the same id cannot be told apart in the text, so an edit
+/// of either is refused.
 fn group_index(fc: &Flowchart, id: &str) -> Result<usize, EditError> {
+    if fc.subgraphs.iter().filter(|s| s.id == id).count() > 1 {
+        return Err(EditError::Invalid(format!("two groups use the id '{id}': give each one an id of its own in the text (subgraph id[\"Title\"])")));
+    }
     fc.subgraph_index(id).ok_or_else(|| EditError::Invalid(format!("there is no group '{id}'")))
 }
 
@@ -564,7 +569,7 @@ fn insert_before_end(src: &str, fc: &Flowchart, owners: &[Option<usize>], g: usi
 /// Puts a node inside group `dest`, or outside every group when `dest` is None. The label, shape,
 /// style and links of the node stay. Its lines inside groups are cut: a link in such a line goes to
 /// a line of its own outside the groups, and the other nodes of the line stay where they were.
-pub fn move_to_group(src: &str, node: &str, dest: Option<&str>) -> Result<String, EditError> {
+fn move_to_group_raw(src: &str, node: &str, dest: Option<&str>) -> Result<String, EditError> {
     let fc = load_checked(src)?;
     let ni = fc.node_index(node).ok_or_else(|| EditError::NoSuchNode(node.to_string()))?;
     let n = fc.nodes.get(ni).ok_or_else(|| EditError::NoSuchNode(node.to_string()))?;
@@ -585,7 +590,8 @@ pub fn move_to_group(src: &str, node: &str, dest: Option<&str>) -> Result<String
     };
     let in_group: HashSet<usize> = fc.statements.iter().enumerate().filter(|(si, st)| own.get(*si).copied().flatten().is_some() && mentions(st)).map(|(si, _)| si).collect();
     let refs = || fc.statements.iter().filter_map(|st| if let StmtKind::Chain { groups, .. } = &st.kind { Some(groups) } else { None }).flatten().flat_map(|g| g.nodes.iter()).filter(|r| r.id == node);
-    let def = refs().find(|r| r.has_def).or_else(|| refs().next()).map_or_else(|| node.to_string(), |r| text_of(r.span));
+    // The last definition is the one that counts (`X[Raiz]` ... `X[Novo]` reads "Novo").
+    let def = refs().rfind(|r| r.has_def).or_else(|| refs().next()).map_or_else(|| node.to_string(), |r| text_of(r.span));
     let mut readd: Vec<String> = Vec::new();
     for e in fc.edges.iter().filter(|e| (e.from == node || e.to == node) && in_group.contains(&e.stmt)) {
         if let Some(Stmt { kind: StmtKind::Chain { links, .. }, .. }) = fc.statements.get(e.stmt) {
@@ -632,6 +638,12 @@ pub fn move_to_group(src: &str, node: &str, dest: Option<&str>) -> Result<String
     let kept = fc3.node_index(node).and_then(|i| fc3.nodes.get(i)).map(|m| m.classes.clone()).unwrap_or_default();
     for c in n.classes.iter().filter(|c| !kept.contains(c)) {
         text = insert_line_with(&text, &format!("class {node} {c}"), &base);
+    }
+    // A definition left elsewhere may now come last and give the node another label or shape:
+    // say the one it had once more, at the end.
+    let now = fc3.node_index(node).and_then(|i| fc3.nodes.get(i)).map(|m| (m.label.clone(), m.shape));
+    if now != Some((n.label.clone(), n.shape)) {
+        text = insert_line_with(&text, &format!("{node}{}", shape_text(n.shape, &n.label)), &base);
     }
     Ok(text)
 }
@@ -725,7 +737,7 @@ fn drop_group_offsets(src: &str, ids: &[String]) -> Result<String, EditError> {
 /// Undoes a group: its lines go and what was inside moves up to the group outside. Links that
 /// pointed at the group go too (without it the id would become a new node); the number of links
 /// that went is returned.
-pub fn ungroup(src: &str, id: &str) -> Result<(String, usize), EditError> {
+fn ungroup_raw(src: &str, id: &str) -> Result<(String, usize), EditError> {
     let fc = load_checked(src)?;
     group_index(&fc, id)?;
     let arrows = fc.edges.iter().filter(|e| e.from == id || e.to == id).count();
@@ -735,7 +747,7 @@ pub fn ungroup(src: &str, id: &str) -> Result<(String, usize), EditError> {
 }
 
 /// Deletes a group with the groups, nodes and links inside it.
-pub fn remove_group(src: &str, id: &str) -> Result<String, EditError> {
+fn remove_group_raw(src: &str, id: &str) -> Result<String, EditError> {
     let fc = load_checked(src)?;
     let g = group_index(&fc, id)?;
     let inside = |mut p: Option<usize>| {
@@ -851,4 +863,146 @@ pub fn set_offsets(src: &str, offsets: &std::collections::BTreeMap<String, (f32,
     }
     out.push_str(&format!("{} {}\n", flowchart::LAYOUT_COMMENT, items.join(" ")));
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------------
+// `linkStyle` follows the links
+// ---------------------------------------------------------------------------------------------
+
+/// `linkStyle` names links by their number in the text. After an edit that moved, changed or
+/// removed links, its numbers are brought to the links they named; a number whose link is gone is
+/// dropped, and a line left with none goes.
+fn keep_link_styles(old: &str, new: String) -> Result<String, EditError> {
+    keep_link_styles_with(old, new, None)
+}
+
+/// Same, with the old → new link numbers when the edit knows them (removing one link of two twins
+/// cannot be told from the text alone).
+fn keep_link_styles_with(old: &str, new: String, known: Option<Vec<Option<usize>>>) -> Result<String, EditError> {
+    if !new.contains("linkStyle") {
+        return Ok(new);
+    }
+    let (a, b) = (load(old)?, load(&new)?);
+    let key = |e: &FlowEdge| (e.from.clone(), e.to.clone(), e.kind, e.label.clone());
+    let (ka, kb): (Vec<_>, Vec<_>) = (a.edges.iter().map(key).collect(), b.edges.iter().map(key).collect());
+    let (n, m) = (ka.len(), kb.len());
+    // The links that stayed, in order: the longest common run of equal links. Read from the end,
+    // twins (`A --> B` twice) pair up by place, not by which comes first.
+    let mut map: Vec<Option<usize>> = vec![None; n];
+    let mut taken = vec![false; m];
+    if let Some(k) = known.filter(|k| k.len() == n) {
+        map = k;
+        taken.fill(true);
+    } else if n.saturating_mul(m) <= 4_000_000 {
+        let w = m + 1;
+        let mut dp = vec![0u32; (n + 1) * w];
+        for x in 1..=n {
+            for y in 1..=m {
+                let v = if ka.get(x - 1) == kb.get(y - 1) { dp[(x - 1) * w + y - 1] + 1 } else { dp[(x - 1) * w + y].max(dp[x * w + y - 1]) };
+                dp[x * w + y] = v;
+            }
+        }
+        let (mut x, mut y) = (n, m);
+        while x > 0 && y > 0 {
+            if ka.get(x - 1) == kb.get(y - 1) && dp[x * w + y] == dp[(x - 1) * w + y - 1] + 1 {
+                map[x - 1] = Some(y - 1);
+                taken[y - 1] = true;
+                x -= 1;
+                y -= 1;
+            } else if dp[(x - 1) * w + y] >= dp[x * w + y - 1] {
+                x -= 1;
+            } else {
+                y -= 1;
+            }
+        }
+    }
+    // The rest moved or changed: an equal link elsewhere first, then (when as many are left on
+    // both sides, as after a change of label, kind or direction) by order.
+    for (x, slot) in map.iter_mut().enumerate() {
+        if slot.is_none() {
+            if let Some(y) = (0..m).find(|y| !taken[*y] && kb.get(*y) == ka.get(x)) {
+                taken[y] = true;
+                *slot = Some(y);
+            }
+        }
+    }
+    let left_old: Vec<usize> = (0..n).filter(|x| map[*x].is_none()).collect();
+    let left_new: Vec<usize> = (0..m).filter(|y| !taken[*y]).collect();
+    if left_old.len() == left_new.len() {
+        for (x, y) in left_old.into_iter().zip(left_new) {
+            map[x] = Some(y);
+        }
+    }
+    let mut edits: Vec<(Span, String)> = Vec::new();
+    for st in &b.statements {
+        if !matches!(&st.kind, StmtKind::Keyword { word, .. } if word == "linkStyle") {
+            continue;
+        }
+        let text = new.get(st.span.start..st.span.end).unwrap_or("");
+        let rest = text.strip_prefix("linkStyle").unwrap_or("");
+        let lead = rest.len() - rest.trim_start().len();
+        // The numbers run up to the first property: `0,2`, `0, 2`.
+        let body = rest.trim_start();
+        let run = body.find(|c: char| !(c.is_ascii_digit() || c == ',' || c == ' ' || c == '\t')).unwrap_or(body.len());
+        let list = body.get(..run).unwrap_or("").trim_end();
+        let Ok(nums) = list.split(',').map(|n| n.trim().parse::<usize>()).collect::<Result<Vec<usize>, _>>() else { continue };
+        // A number past the old links named none: it stays as written.
+        let moved: Vec<usize> = nums.iter().filter_map(|k| if *k >= n { Some(*k) } else { map.get(*k).copied().flatten() }).collect();
+        if moved == nums {
+            continue;
+        }
+        let start = st.span.start + "linkStyle".len() + lead;
+        if moved.is_empty() {
+            edits.push((st.span, "\u{0}".to_string()));
+        } else {
+            let joined = moved.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+            edits.push((Span::new(start, start + list.len()), joined));
+        }
+    }
+    if edits.is_empty() {
+        return Ok(new);
+    }
+    Ok(clean_markers(&apply(&new, edits)?))
+}
+
+pub fn remove_node(src: &str, id: &str) -> Result<String, EditError> {
+    keep_link_styles(src, remove_node_raw(src, id)?)
+}
+
+pub fn remove_edge(src: &str, edge: usize) -> Result<String, EditError> {
+    let out = remove_edge_raw(src, edge)?;
+    let count = load(src)?.edges.len();
+    let map = (0..count).map(|i| match i.cmp(&edge) {
+        std::cmp::Ordering::Less => Some(i),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(i - 1),
+    });
+    keep_link_styles_with(src, out, Some(map.collect()))
+}
+
+/// Changes the label (`Some(None)` clears it) and/or the kind of an edge.
+pub fn set_edge(src: &str, edge: usize, label: Option<Option<&str>>, kind: Option<LinkKind>) -> Result<String, EditError> {
+    keep_link_styles(src, set_edge_raw(src, edge, label, kind)?)
+}
+
+/// Reverses an edge; returns the new text and the edge's new number.
+pub fn reverse_edge(src: &str, edge: usize) -> Result<(String, usize), EditError> {
+    let (out, index) = reverse_edge_raw(src, edge)?;
+    Ok((keep_link_styles(src, out)?, index))
+}
+
+/// See `move_to_group_raw`.
+pub fn move_to_group(src: &str, node: &str, dest: Option<&str>) -> Result<String, EditError> {
+    keep_link_styles(src, move_to_group_raw(src, node, dest)?)
+}
+
+/// See `ungroup_raw`.
+pub fn ungroup(src: &str, id: &str) -> Result<(String, usize), EditError> {
+    let (out, n) = ungroup_raw(src, id)?;
+    Ok((keep_link_styles(src, out)?, n))
+}
+
+/// Deletes a group with the groups, nodes and links inside it.
+pub fn remove_group(src: &str, id: &str) -> Result<String, EditError> {
+    keep_link_styles(src, remove_group_raw(src, id)?)
 }

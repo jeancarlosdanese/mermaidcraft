@@ -922,6 +922,27 @@ fn title_rect(s: &scene::Scene, title: &str, c: usize, font: look::Font) -> scen
     scene::Rect { x: left, y: y - h / 2.0, w, h }
 }
 
+/// Is the title of group `c` drawn over edge `ei`, on a patch of its own (the frame had no free
+/// place for it)?
+fn over_the_arrows(s: &scene::Scene, c: usize, ei: usize) -> bool {
+    let patch = s.prims.iter().position(|p| is_patch(p, c));
+    let last_edge = s.prims.iter().rposition(|p| p.tag == scene::Tag::Edge(ei));
+    matches!((patch, last_edge), (Some(a), Some(b)) if a > b)
+}
+
+/// The patch under a title drawn over the arrows: a filled rectangle of the group with no outline
+/// (the frame itself has one, in every look).
+fn is_patch(p: &scene::Prim, c: usize) -> bool {
+    p.tag == scene::Tag::Cluster(c) && p.stroke.is_none() && matches!(p.shape, scene::PrimShape::Rect { .. })
+}
+
+/// Titles that sit over the arrows, on a patch.
+fn titles_over(src: &str, opts: &RenderOptions) -> usize {
+    let f = flow(src);
+    let (s, _) = render_source_with(src, opts).unwrap();
+    (0..f.subgraphs.len()).filter(|c| s.prims.iter().any(|p| is_patch(p, *c))).count()
+}
+
 fn titles_crossed(src: &str, opts: &RenderOptions) -> Vec<String> {
     let f = flow(src);
     let (s, _) = render_source_with(src, opts).unwrap();
@@ -933,7 +954,7 @@ fn titles_crossed(src: &str, opts: &RenderOptions) -> Vec<String> {
             if f.subgraph_index(&e.from).is_some() || f.subgraph_index(&e.to).is_some() {
                 continue;
             }
-            if s.edge_paths[ei].windows(2).any(|w| geom::segment_hits_rect(w[0], w[1], &r)) {
+            if s.edge_paths[ei].windows(2).any(|w| geom::segment_hits_rect(w[0], w[1], &r)) && !over_the_arrows(&s, c, ei) {
                 hits.push(format!("{} --> {} crosses the title of {}", e.from, e.to, sg.id));
             }
         }
@@ -946,7 +967,9 @@ fn no_arrow_crosses_the_title_of_a_group() {
     let small = "flowchart TD\n  X --> A\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n";
     let up = "flowchart TD\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n  A --> X\n";
     let long = include_str!("fixtures/fluxo-longo.mmd");
-    for (name, src) in [("small", small), ("up", up), ("fluxo-longo", long)] {
+    let wide = "flowchart TD\n  S --> A & B & C & D\n  subgraph G[\"Titulo do grupo largo\"]\n    A\n    B\n    C\n    D\n  end\n";
+    let nested = "flowchart TD\n  X --> A\n  subgraph G1[\"Externo com titulo comprido\"]\n    P --> Q\n    subgraph G2[\"Interno com titulo comprido\"]\n      A --> B\n    end\n  end\n  X --> P\n";
+    for (name, src) in [("small", small), ("up", up), ("fluxo-longo", long), ("nested", nested), ("wide", wide)] {
         for opts in [RenderOptions::default(), RenderOptions::clean()] {
             let hits = titles_crossed(src, &opts);
             assert!(hits.is_empty(), "{name}: {hits:?}");
@@ -990,4 +1013,149 @@ fn a_title_detour_does_not_run_into_a_node_beside_the_title() {
             assert!(!s.edge_paths[ei].windows(2).any(|w| geom::segment_hits_rect(w[0], w[1], &r)), "{} --> {} runs through {}", e.from, e.to, n.id);
         }
     }
+}
+
+#[test]
+fn keeping_arrows_off_a_title_does_not_bend_them() {
+    // The title moves out of the way; the arrows into the group stay as the layout drew them.
+    let wide = "flowchart TD\n  S --> A & B & C & D\n  subgraph G[\"Titulo do grupo largo\"]\n    A\n    B\n    C\n    D\n  end\n";
+    let nested = "flowchart TD\n  X --> A\n  subgraph G1[\"Externo com titulo comprido\"]\n    P --> Q\n    subgraph G2[\"Interno com titulo comprido\"]\n      A --> B\n    end\n  end\n  X --> P\n";
+    for src in [wide, nested] {
+        for opts in [RenderOptions::default(), RenderOptions::clean()] {
+            let (s, _) = render_source_with(src, &opts).unwrap();
+            let plain = src.replace("[\"Titulo do grupo largo\"]", "").replace("[\"Externo com titulo comprido\"]", "").replace("[\"Interno com titulo comprido\"]", "");
+            let (p, _) = render_source_with(&plain, &opts).unwrap();
+            let len = |path: &[(f32, f32)]| path.windows(2).map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt()).sum::<f32>();
+            let total = |sc: &scene::Scene| sc.edge_paths.iter().map(|path| len(path)).sum::<f32>();
+            // Titled frames are a little taller; the routes must not grow much beyond that.
+            assert!(total(&s) <= total(&p) * 1.25 + 40.0, "{} vs {} for {src}", total(&s), total(&p));
+        }
+    }
+}
+
+#[test]
+fn a_title_sits_over_the_arrows_only_when_no_place_is_free() {
+    let wide = "flowchart TD\n  S --> A & B & C & D\n  subgraph G[\"Titulo do grupo largo\"]\n    A\n    B\n    C\n    D\n  end\n";
+    let narrow = "flowchart TD\n  X --> A\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n";
+    for opts in [RenderOptions::default(), RenderOptions::clean()] {
+        // Four arrows spread over the top leave no gap as wide as the title: it sits over them.
+        assert!(titles_crossed(wide, &opts).is_empty());
+        assert_eq!(titles_over(narrow, &opts), 1);
+    }
+    // A group no arrow enters keeps its title in the usual place, without a patch.
+    // One arrow down the middle of a wide frame: the title keeps its corner.
+    let roomy = "flowchart TD\n  X --> B\n  subgraph G[\"Curto\"]\n    A --> B\n    C --> B\n    D --> B\n  end\n";
+    assert_eq!(titles_over(roomy, &RenderOptions::clean()), 0);
+    assert!(titles_crossed(roomy, &RenderOptions::clean()).is_empty());
+    let alone = "flowchart TD\n  subgraph G[\"Sozinho\"]\n    A --> B\n  end\n";
+    // (in the default look the usual place is the top-left corner; the classic one centres it)
+    let (s, _) = render_source_with(alone, &RenderOptions::default()).unwrap();
+    let f = flow(alone);
+    let r = title_rect(&s, "Sozinho", 0, RenderOptions::default().font);
+    assert!((r.x - (s.cluster_boxes[0].x + 12.0)).abs() < 0.5, "{} vs {}", r.x, s.cluster_boxes[0].x);
+    assert_eq!(titles_over(alone, &RenderOptions::clean()), 0);
+    assert_eq!(f.subgraphs.len(), 1);
+}
+
+#[test]
+fn edit_groups_with_the_same_id_are_refused() {
+    let src = "flowchart TD\n  subgraph Etapa\n    A[Primeira]\n  end\n  subgraph Etapa\n    B[Segunda]\n  end\n  C[Solto]\n";
+    assert!(edit::remove_group(src, "Etapa").is_err());
+    assert!(edit::ungroup(src, "Etapa").is_err());
+    assert!(edit::rename_group(src, "Etapa", "x").is_err());
+    assert!(edit::move_to_group(src, "C", Some("Etapa")).is_err());
+    let msg = edit::remove_group(src, "Etapa").unwrap_err().to_string();
+    assert!(msg.contains("two groups"), "{msg}");
+}
+
+#[test]
+fn edit_move_keeps_the_label_that_counts() {
+    // The last definition is the one shown.
+    let src = "flowchart TD\n  X[Raiz] --> Y\n  subgraph G1\n    X[Novo]\n  end\n  subgraph G2\n    B\n  end\n";
+    assert_eq!(flow(src).nodes[0].label, "Novo");
+    for dest in [Some("G2"), None] {
+        let out = edit::move_to_group(src, "X", dest).unwrap();
+        let f = flow(&out);
+        assert_eq!(f.nodes[f.node_index("X").unwrap()].label, "Novo", "{dest:?}: {out}");
+        assert_eq!(group_of(&out, "X").as_deref(), dest, "{out}");
+    }
+    let src = "flowchart TD\n  subgraph G1\n    X[Um]\n  end\n  subgraph G2\n    X{Dois}\n  end\n  subgraph G3\n    B\n  end\n";
+    let out = edit::move_to_group(src, "X", Some("G3")).unwrap();
+    let f = flow(&out);
+    let x = &f.nodes[f.node_index("X").unwrap()];
+    assert_eq!((x.label.as_str(), x.shape), ("Dois", NodeShape::Diamond), "{out}");
+}
+
+#[test]
+fn link_styles_follow_their_links() {
+    // Moving X out sends A --> X to the end: its style goes with it.
+    let src = "flowchart TD\n  subgraph G1\n    A --> X\n    B --> C\n  end\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let out = edit::move_to_group(src, "X", None).unwrap();
+    let f = flow(&out);
+    let ax = f.edges.iter().position(|e| e.from == "A" && e.to == "X").unwrap();
+    let bc = f.edges.iter().position(|e| e.from == "B" && e.to == "C").unwrap();
+    assert!(out.contains(&format!("linkStyle {ax} stroke:red")) && out.contains(&format!("linkStyle {bc} stroke:blue")), "{out}");
+    // A removed link takes its number out of the list, and a list left empty goes.
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  C --> D\n  linkStyle 0,2 stroke:red\n  linkStyle 1 stroke:blue\n  linkStyle default stroke:#999\n";
+    let out = edit::remove_edge(src, 1).unwrap();
+    assert!(out.contains("linkStyle 0,1 stroke:red") && !out.contains("stroke:blue") && out.contains("linkStyle default stroke:#999"), "{out}");
+    let out = edit::remove_node(src, "A").unwrap();
+    assert!(out.contains("linkStyle 1 stroke:red") && out.contains("linkStyle 0 stroke:blue"), "{out}");
+    // Reversing a link keeps its number on it.
+    let src = "flowchart TD\n  A --> B --> C\n  D --> E\n  linkStyle 0 stroke:red\n  linkStyle 2 stroke:blue\n";
+    let (out, n) = edit::reverse_edge(src, 0).unwrap();
+    let f = flow(&out);
+    let de = f.edges.iter().position(|e| e.from == "D").unwrap();
+    assert!(out.contains(&format!("linkStyle {n} stroke:red")) && out.contains(&format!("linkStyle {de} stroke:blue")), "{out}");
+    // Ungroup and removing a group drop the styles of the links that went.
+    let src = "flowchart TD\n  subgraph G1\n    A --> B\n  end\n  C --> G1\n  C --> D\n  linkStyle 1 stroke:red\n  linkStyle 2 stroke:blue\n";
+    let (out, _) = edit::ungroup(src, "G1").unwrap();
+    assert!(!out.contains("stroke:red") && out.contains("linkStyle 1 stroke:blue"), "{out}");
+    let out = edit::remove_group(src, "G1").unwrap();
+    assert!(!out.contains("stroke:red") && out.contains("linkStyle 0 stroke:blue"), "{out}");
+}
+
+#[test]
+fn link_styles_follow_twin_links_and_spaced_lists() {
+    // Changing the label of one of two twin links moves no link: the numbers stay.
+    let src = "flowchart TD\n  A -->|x| B\n  A -->|x| B\n  A --> B\n  linkStyle 0 stroke:red\n  linkStyle 2 stroke:blue\n";
+    let out = edit::set_edge(src, 0, Some(None), None).unwrap();
+    assert!(out.contains("linkStyle 0 stroke:red") && out.contains("linkStyle 2 stroke:blue"), "{out}");
+    // Reversing in place keeps the number, even when the result is a twin of another link.
+    let src = "flowchart TD\n  A --> B\n  B --> A\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let (out, n) = edit::reverse_edge(src, 0).unwrap();
+    assert_eq!(n, 0);
+    assert!(out.contains("linkStyle 0 stroke:red") && out.contains("linkStyle 1 stroke:blue"), "{out}");
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  C --> B\n  linkStyle 2 stroke:red\n";
+    let (out, _) = edit::reverse_edge(src, 1).unwrap();
+    assert!(out.contains("linkStyle 2 stroke:red"), "{out}");
+    // Removing the first of two twins drops its style and moves the other's.
+    let src = "flowchart TD\n  A --> B\n  A --> B\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(!out.contains("stroke:red") && out.contains("linkStyle 0 stroke:blue"), "{out}");
+    // A list written with spaces is renumbered too.
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  C --> D\n  linkStyle 1, 2 stroke:red\n";
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(out.contains("linkStyle 0,1 stroke:red"), "{out}");
+}
+
+#[test]
+fn a_title_over_a_see_through_frame_still_hides_the_arrows() {
+    let src = "flowchart TD\n  X --> A\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n  style G fill:none\n";
+    let (s, _) = render_source_with(src, &RenderOptions::clean()).unwrap();
+    let patch = s.prims.iter().find(|p| is_patch(p, 0)).expect("patch");
+    assert_eq!(patch.fill.map(|c| c[3]), Some(255));
+}
+
+#[test]
+fn removing_either_twin_keeps_the_other_ones_style() {
+    let src = "flowchart TD\n  A --> B\n  A --> B\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let out = edit::remove_edge(src, 1).unwrap();
+    assert!(out.contains("linkStyle 0 stroke:red") && !out.contains("stroke:blue"), "{out}");
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(out.contains("linkStyle 0 stroke:blue") && !out.contains("stroke:red"), "{out}");
+    // A number that named no link is left as written.
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  linkStyle 9 stroke:red\n";
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(out.contains("linkStyle 9 stroke:red"), "{out}");
 }
