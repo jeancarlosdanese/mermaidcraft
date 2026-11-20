@@ -1,6 +1,6 @@
 # FEAT: grupos (`subgraph`) no canvas
 
-Estado: fases A e B commitadas na branch `feat/grupos`; correções da revisão final aguardando o "pode commitar" (0.8.0)
+Estado: entregue na 0.8.0 (20/11/2026)
 
 ## Problema
 

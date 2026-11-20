@@ -4,7 +4,7 @@ members = [".", "crates/engine", "crates/cli"]
 default-members = [".", "crates/engine", "crates/cli"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -44,7 +44,7 @@ name = "mermaidcraft"
 description = "MermaidCraft: native Mermaid diagram editor (egui shell over the MermaidCraft engine)"
 # Written here (not inherited) so tools that read the version straight from this file, such as the
 # shell prompt, show it plainly. Keep it equal to [workspace.package] (checked by a test).
-version = "0.7.0"
+version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true

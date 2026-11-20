@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "mermaidcraft"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "eframe",
  "egui",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "mermaidcraft-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mermaidcraft-engine",
  "serde_json",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "mermaidcraft-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "resvg",
  "svg2pdf",
