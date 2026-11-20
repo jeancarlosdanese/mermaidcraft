@@ -27,6 +27,8 @@ enum Sel {
     None,
     Node(String),
     Edge(usize),
+    /// A `subgraph`, by id.
+    Group(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,7 +42,9 @@ enum Tool {
 enum MenuTarget {
     Node(String),
     Edge(usize),
-    /// Empty space or a group frame, at this point of the scene.
+    /// A group, with the point of the scene that was clicked.
+    Group(String, (f32, f32)),
+    /// Empty space, at this point of the scene.
     Empty((f32, f32)),
 }
 
@@ -58,6 +62,12 @@ enum MenuAction {
     Line(LineStyle),
     Head(Head),
     Reverse,
+    /// Dissolve the group, keeping what is inside.
+    Ungroup,
+    /// Put the node in the group with this number (None: outside every group).
+    MoveTo(Option<usize>),
+    /// Wrap the node in a new group.
+    NewGroup,
     NewHere,
     AutoArrange,
     Fit,
@@ -344,8 +354,14 @@ impl App {
             // The line that gives the node its shape and label, else its first mention.
             Sel::Node(id) => f.node_index(id).and_then(|i| f.nodes.get(i)).map(|n| n.def_span.map_or(n.line, |d| 1 + self.text.get(..d.start).unwrap_or("").matches('\n').count())),
             Sel::Edge(i) => f.edges.get(*i).map(|e| e.line),
+            Sel::Group(id) => f.subgraph_index(id).and_then(|i| f.subgraphs.get(i)).map(|g| g.line),
             Sel::None => None,
         }
+    }
+
+    /// Is `id` a group (and not a node)?
+    fn is_group(&self, id: &str) -> bool {
+        self.flow().is_some_and(|f| f.node_index(id).is_none() && f.subgraph_index(id).is_some())
     }
 
     /// Changes the style of a node through `change`, as one undo step.
@@ -391,6 +407,7 @@ impl App {
         let valid = match (&self.sel, self.flow()) {
             (Sel::Node(id), Some(f)) => f.node_index(id).is_some(),
             (Sel::Edge(i), Some(f)) => *i < f.edges.len(),
+            (Sel::Group(id), Some(f)) => f.subgraph_index(id).is_some(),
             (Sel::None, _) => true,
             _ => false,
         };
@@ -692,6 +709,7 @@ impl App {
         let r = match &self.sel {
             Sel::Node(id) => edit::remove_node(&self.text, id),
             Sel::Edge(i) => edit::remove_edge(&self.text, *i),
+            Sel::Group(id) => edit::remove_group(&self.text, id),
             Sel::None => return,
         };
         if self.visual(r, now) {
@@ -700,7 +718,9 @@ impl App {
     }
 
     /// Colour of a node: a palette tone, or `None` for the automatic one (from the look).
+    /// A group takes the pale tone for its frame, a node the light one.
     fn set_node_colour(&mut self, id: &str, hue: Option<engine::look::Hue>, now: f64) {
+        let group = self.is_group(id);
         self.restyle(
             id,
             |m| match hue {
@@ -709,7 +729,7 @@ impl App {
                     m.remove("stroke");
                 }
                 Some(h) => {
-                    m.insert("fill".into(), engine::look::hex(h.light));
+                    m.insert("fill".into(), engine::look::hex(if group { h.pale } else { h.light }));
                     m.insert("stroke".into(), engine::look::hex(h.stroke));
                 }
             },
@@ -717,18 +737,31 @@ impl App {
         );
     }
 
+    /// A group frame is dashed unless the look is the classic one, so "solid" has to be written.
     fn set_node_dashed(&mut self, id: &str, dashed: bool, now: f64) {
+        let group = self.is_group(id);
         self.restyle(
             id,
             |m| {
                 if dashed {
                     m.insert("stroke-dasharray".into(), "5 5".into());
+                } else if group {
+                    m.insert("stroke-dasharray".into(), "0".into());
                 } else {
                     m.remove("stroke-dasharray");
                 }
             },
             now,
         );
+    }
+
+    /// Is the outline of a node or group drawn dashed, given its own `style` line?
+    fn outline_dashed(&self, id: &str, styles: &engine::StyleMap) -> bool {
+        match styles.get("stroke-dasharray").map(|v| v.trim()) {
+            Some("0" | "none") if self.is_group(id) => false,
+            Some(_) => true,
+            None => self.is_group(id) && self.look.colors != engine::look::ColorMode::Classic,
+        }
     }
 
     /// A new node linked from `from`, selected with its label open for typing.
@@ -748,11 +781,15 @@ impl App {
 
     /// A new node with its centre at `at` (scene coordinates of the drawing on screen), kept there by
     /// an offset in the layout comment. One undo step.
-    fn add_node_at(&mut self, at: (f32, f32), now: f64) {
+    fn add_node_at(&mut self, at: (f32, f32), into: Option<&str>, now: f64) {
         let Some(old) = self.scene.clone() else { return };
         let label = self.tr("New node");
         let opts = self.opts();
         let r = edit::add_node(&self.text, None, label, NodeShape::Rect).and_then(|(text, id)| {
+            let text = match into {
+                Some(g) => edit::move_to_group(&text, &id, Some(g))?,
+                None => text,
+            };
             // Where the layout puts the new node, then the offset that brings it to the point. The
             // scene is the layout moved by `shift`, which changes from one drawing to the next.
             let Some(Diagram::Flowchart(f)) = engine::parse(&text).diagram else { return Err(edit::EditError::NotFlowchart) };
@@ -817,6 +854,47 @@ impl App {
                 self.sel = Sel::Edge(i);
                 self.focus_label = true;
             }
+            (MenuTarget::Group(id, _), MenuAction::Rename) => {
+                self.sel = Sel::Group(id);
+                self.focus_label = true;
+            }
+            (MenuTarget::Group(id, _), MenuAction::Colour(hue)) => self.set_node_colour(&id, hue, now),
+            (MenuTarget::Group(id, _), MenuAction::Dashed(d)) => self.set_node_dashed(&id, d, now),
+            (MenuTarget::Group(id, _), MenuAction::Delete) => {
+                self.sel = Sel::Group(id);
+                self.delete_selected(now);
+            }
+            (MenuTarget::Group(id, _), MenuAction::Ungroup) => match edit::ungroup(&self.text, &id) {
+                Ok((text, links)) => {
+                    if self.visual(Ok(text), now) {
+                        self.sel = Sel::None;
+                        if links > 0 {
+                            let m = format!("{links} {}", self.tr("links to the group were removed"));
+                            self.flash(m, now);
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.flash(e.to_string(), now);
+                }
+            },
+            (MenuTarget::Node(id), MenuAction::MoveTo(dest)) => {
+                let group = dest.and_then(|k| self.flow().and_then(|f| f.subgraphs.get(k)).map(|g| g.id.clone()));
+                let r = edit::move_to_group(&self.text, &id, group.as_deref());
+                self.visual(r, now);
+            }
+            (MenuTarget::Node(id), MenuAction::NewGroup) => {
+                let title = self.tr("Group");
+                match edit::new_group(&self.text, &id, title) {
+                    Ok((text, gid)) => {
+                        if self.visual(Ok(text), now) {
+                            self.sel = Sel::Group(gid);
+                            self.focus_label = true;
+                        }
+                    }
+                    Err(e) => self.flash(e.to_string(), now),
+                }
+            }
             (MenuTarget::Node(id), MenuAction::Shape(shape)) => {
                 let r = edit::set_node(&self.text, &id, None, Some(shape));
                 self.visual(r, now);
@@ -850,7 +928,8 @@ impl App {
                 }
             }
             (MenuTarget::Edge(i), MenuAction::Reverse) => self.reverse_edge(i, now),
-            (MenuTarget::Empty(at), MenuAction::NewHere) => self.add_node_at(at, now),
+            (MenuTarget::Empty(at), MenuAction::NewHere) => self.add_node_at(at, None, now),
+            (MenuTarget::Group(id, at), MenuAction::NewHere) => self.add_node_at(at, Some(&id), now),
             (_, MenuAction::AutoArrange) => self.auto_arrange(now),
             (_, MenuAction::Fit) => self.auto_fit = true,
             (_, MenuAction::Direction(d)) => {
@@ -892,7 +971,7 @@ impl App {
                 let node = flow.node_index(id).and_then(|i| flow.nodes.get(i))?;
                 let styles = edit::own_node_style(&self.text, flow, id);
                 let fill = styles.get("fill").map(|v| v.to_ascii_lowercase());
-                let dashed = styles.contains_key("stroke-dasharray");
+                let dashed = self.outline_dashed(id, &styles);
                 item(rects, ui.add(egui::Button::new(tr("Rename")).shortcut_text("F2")), MenuAction::Rename);
                 sub(ui, rects, "Shape", &mut |ui, rects| {
                     for s in NodeShape::all() {
@@ -918,8 +997,51 @@ impl App {
                 ui.separator();
                 item(rects, ui.add(egui::Button::new(tr("Link to…"))), MenuAction::LinkTo);
                 item(rects, ui.add(egui::Button::new(tr("New linked node"))), MenuAction::NewLinked);
+                sub(ui, rects, "Move to group", &mut |ui, rects| {
+                    item(rects, ui.add(egui::Button::new(tr("Outside groups")).selected(node.parent.is_none())), MenuAction::MoveTo(None));
+                    for (k, g) in flow.subgraphs.iter().enumerate() {
+                        let mut depth = 0;
+                        let mut up = g.parent;
+                        while let Some(p) = up.filter(|_| depth < 8) {
+                            depth += 1;
+                            up = flow.subgraphs.get(p).and_then(|x| x.parent);
+                        }
+                        let label = format!("{}{}", "   ".repeat(depth), if g.title.is_empty() { g.id.as_str() } else { g.title.as_str() });
+                        item(rects, ui.add(egui::Button::new(label).selected(node.parent == Some(k))), MenuAction::MoveTo(Some(k)));
+                    }
+                    ui.separator();
+                    item(rects, ui.add(egui::Button::new(tr("New group"))), MenuAction::NewGroup);
+                });
                 ui.separator();
                 item(rects, ui.add(egui::Button::new(tr("Delete")).shortcut_text("Del")), MenuAction::Delete);
+            }
+            MenuTarget::Group(id, _) => {
+                flow.subgraph_index(id)?;
+                let styles = edit::own_node_style(&self.text, flow, id);
+                let fill = styles.get("fill").map(|v| v.to_ascii_lowercase());
+                let dashed = self.outline_dashed(id, &styles);
+                item(rects, ui.add(egui::Button::new(tr("Rename")).shortcut_text("F2")), MenuAction::Rename);
+                sub(ui, rects, "Colour", &mut |ui, rects| {
+                    item(rects, ui.add(egui::Button::new(tr("Auto")).selected(fill.is_none())), MenuAction::Colour(None));
+                    for (name, hue) in engine::look::SWATCHES {
+                        let chosen = fill.as_deref() == Some(engine::look::hex(hue.pale).as_str());
+                        let chip = egui::Id::new(("menu_swatch", name));
+                        let out = egui::Button::new((egui::Atom::custom(chip, Vec2::splat(14.0)), tr(name))).selected(chosen).atom_ui(ui);
+                        if let Some(r) = out.rect(chip) {
+                            swatch(ui.painter(), r, 3.0, hue, self.dark, false);
+                        }
+                        item(rects, out.response, MenuAction::Colour(Some(hue)));
+                    }
+                });
+                sub(ui, rects, "Outline", &mut |ui, rects| {
+                    item(rects, ui.add(egui::Button::new(tr("Solid")).selected(!dashed)), MenuAction::Dashed(false));
+                    item(rects, ui.add(egui::Button::new(tr("Dashed")).selected(dashed)), MenuAction::Dashed(true));
+                });
+                ui.separator();
+                item(rects, ui.add(egui::Button::new(tr("New node here"))), MenuAction::NewHere);
+                item(rects, ui.add(egui::Button::new(tr("Ungroup"))), MenuAction::Ungroup);
+                ui.separator();
+                item(rects, ui.add(egui::Button::new(tr("Delete group")).shortcut_text("Del")), MenuAction::Delete);
             }
             MenuTarget::Edge(i) => {
                 let e = flow.edges.get(*i)?;
@@ -1313,11 +1435,10 @@ impl App {
         if let Some((byte, line, focused)) = cursor_at {
             if focused && self.cursor_byte != Some(byte) {
                 self.cursor_byte = Some(byte);
-                let found = self.flow().and_then(|f| edit::item_at(f, byte, line)).and_then(|it| match it {
-                    edit::TextItem::Node(id) => Some(Sel::Node(id)),
-                    edit::TextItem::Edge(i) => Some(Sel::Edge(i)),
-                    // A group is selected from the canvas only after phase B of the groups FEAT.
-                    edit::TextItem::Group(_) => None,
+                let found = self.flow().and_then(|f| edit::item_at(f, byte, line)).map(|it| match it {
+                    edit::TextItem::Node(id) => Sel::Node(id),
+                    edit::TextItem::Edge(i) => Sel::Edge(i),
+                    edit::TextItem::Group(id) => Sel::Group(id),
                 });
                 if let Some(sel) = found {
                     if sel != self.sel {
@@ -1425,6 +1546,16 @@ impl App {
                 }
                 _ => return,
             },
+            Sel::Group(id) => match f.subgraph_index(id).and_then(|i| f.subgraphs.get(i)) {
+                // A group needs a title: an empty box leaves it as it was.
+                Some(_) if text.trim().is_empty() => {
+                    let m = self.tr("A group needs a title").to_string();
+                    self.flash(m, now);
+                    return;
+                }
+                Some(g) if g.title != text.trim() => edit::rename_group(&self.text, id, &text),
+                _ => return,
+            },
             Sel::None => return,
         };
         self.visual(r, now);
@@ -1500,6 +1631,7 @@ impl App {
         let current_label = match &sel {
             Sel::Node(id) => flow.node_index(id).and_then(|i| flow.nodes.get(i)).map(|n| n.label.clone()),
             Sel::Edge(i) => flow.edges.get(*i).map(|e| e.label.clone().unwrap_or_default()),
+            Sel::Group(id) => flow.subgraph_index(id).and_then(|i| flow.subgraphs.get(i)).map(|g| g.title.clone()),
             Sel::None => None,
         };
         // Keep the label box in step with the selection and with the text, unless a label typed in it
@@ -1555,7 +1687,7 @@ impl App {
                 }
                 // Outline: solid or dashed.
                 section(ui, self.tr("Outline"));
-                let dashed = styles.contains_key("stroke-dasharray");
+                let dashed = self.outline_dashed(&node.id, &styles);
                 let mut want = dashed;
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut want, false, self.tr("Solid"));
@@ -1571,6 +1703,50 @@ impl App {
                 ui.add_space(6.0);
                 ui.separator();
                 if ui.button(self.tr("Delete")).clicked() {
+                    self.delete_selected(now);
+                }
+            }
+            Sel::Group(id) => {
+                if flow.subgraph_index(id).is_none() {
+                    return;
+                }
+                ui.label(RichText::new(format!("{} {}", self.tr("Group"), id)).strong());
+                section(ui, self.tr("Title"));
+                self.label_box(ui, &sel);
+                let styles = edit::own_node_style(&self.text, &flow, id);
+                let fill = styles.get("fill").map(|v| v.to_ascii_lowercase());
+                section(ui, self.tr("Colour"));
+                let mut pick: Option<Option<engine::look::Hue>> = None;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(5.0);
+                    if ui.selectable_label(fill.is_none(), self.tr("Auto")).clicked() {
+                        pick = Some(None);
+                    }
+                    for (name, hue) in engine::look::SWATCHES {
+                        let chosen = fill.as_deref() == Some(engine::look::hex(hue.pale).as_str());
+                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                        swatch(ui.painter(), r.shrink(1.0), 5.0, hue, self.dark, chosen);
+                        if resp.on_hover_text(self.tr(name)).clicked() {
+                            pick = Some(Some(hue));
+                        }
+                    }
+                });
+                if let Some(choice) = pick {
+                    self.set_node_colour(id, choice, now);
+                }
+                section(ui, self.tr("Outline"));
+                let dashed = self.outline_dashed(id, &styles);
+                let mut want = dashed;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut want, false, self.tr("Solid"));
+                    ui.selectable_value(&mut want, true, self.tr("Dashed"));
+                });
+                if want != dashed {
+                    self.set_node_dashed(id, want, now);
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                if ui.button(self.tr("Delete group")).clicked() {
                     self.delete_selected(now);
                 }
             }
@@ -1668,6 +1844,7 @@ impl App {
             let target = self.flow().and_then(|flow| match &self.sel {
                 Sel::Node(id) => flow.node_index(id).and_then(|i| scene.node_boxes.get(i)).map(|b| egui::Rect::from_min_size(view.to_screen((b.x, b.y)), Vec2::new(b.w, b.h) * view.zoom)),
                 Sel::Edge(i) => scene.edge_paths.get(*i).and_then(|path| path.get(path.len() / 2)).map(|p| egui::Rect::from_center_size(view.to_screen(*p), Vec2::splat(24.0))),
+                Sel::Group(id) => flow.subgraph_index(id).and_then(|i| scene.cluster_boxes.get(i)).map(|b| egui::Rect::from_min_size(view.to_screen((b.x, b.y)), Vec2::new(b.w, b.h) * view.zoom)),
                 Sel::None => None,
             });
             // A click may still be the first half of a double-click (which opens the label): sliding
@@ -1723,6 +1900,12 @@ impl App {
                             painter.add(egui::Shape::line(pts, Stroke::new(5.0, Color32::from_rgba_unmultiplied(40, 120, 255, 110))));
                         }
                     }
+                    Sel::Group(id) => {
+                        if let Some(b) = flow.subgraph_index(&id).and_then(|i| scene.cluster_boxes.get(i)) {
+                            let r = egui::Rect::from_min_size(view.to_screen((b.x, b.y)), Vec2::new(b.w, b.h) * view.zoom).expand(4.0);
+                            painter.rect_stroke(r, 12.0, Stroke::new(2.0, accent), egui::StrokeKind::Middle);
+                        }
+                    }
                     Sel::None => {}
                 }
                 if let Some(l) = &self.link_from {
@@ -1773,6 +1956,7 @@ impl App {
                             Some(key) => {
                                 let offset = self.flow().and_then(|f| f.offsets.get(&key).copied()).unwrap_or((0.0, 0.0));
                                 self.auto_fit = false;
+                                self.sel = Sel::Group(key.strip_prefix("sub:").unwrap_or(&key).to_string());
                                 Drag::Move { id: key, offset, group: true }
                             }
                             None => Drag::Pan,
@@ -1876,6 +2060,12 @@ impl App {
                                 self.link_from = None;
                             }
                         }
+                        // The title strip of a group selects it; the rest of the frame is empty space.
+                        (_, Hit::Cluster(_) | Hit::Nothing) if paint::group_handle_at(&scene, view.to_scene(p)).is_some() => {
+                            let id = paint::group_handle_at(&scene, view.to_scene(p)).and_then(|c| self.flow().and_then(|f| f.subgraphs.get(c)).map(|g| g.id.clone()));
+                            self.sel = id.map_or(Sel::None, Sel::Group);
+                            self.link_from = None;
+                        }
                         _ => {
                             self.sel = Sel::None;
                             self.link_from = None;
@@ -1886,7 +2076,8 @@ impl App {
         }
         if resp.double_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                if let (true, Hit::Node(_)) = (is_flow, hit_at(p)) {
+                let on_title = matches!(hit_at(p), Hit::Cluster(_) | Hit::Nothing) && paint::group_handle_at(&scene, view.to_scene(p)).is_some();
+                if is_flow && (matches!(hit_at(p), Hit::Node(_)) || on_title) {
                     self.focus_label = true;
                 }
             }
@@ -1899,6 +2090,7 @@ impl App {
                 let clicked = match hit_at(p) {
                     Hit::Node(i) if is_flow => flow_ids.get(i).map(|id| MenuTarget::Node(id.clone())),
                     Hit::Edge(i) if is_flow => Some(MenuTarget::Edge(i)),
+                    Hit::Cluster(c) if is_flow => self.flow().and_then(|f| f.subgraphs.get(c)).map(|g| MenuTarget::Group(g.id.clone(), (0.0, 0.0))),
                     _ => None,
                 };
                 // The clicked edge as it will read once the label being typed is saved (its own label
@@ -1924,12 +2116,14 @@ impl App {
                         if f.edges.get(i).is_some_and(same) { Some(i) } else { f.edges.iter().position(same) }.map(MenuTarget::Edge)
                     }),
                     (Some(MenuTarget::Node(id)), _) => self.flow().and_then(|f| f.node_index(&id)).map(|_| MenuTarget::Node(id)),
+                    (Some(MenuTarget::Group(id, _)), _) => self.flow().and_then(|f| f.subgraph_index(&id)).map(|_| MenuTarget::Group(id, view.to_scene(p))),
                     _ => None,
                 }
                 .unwrap_or(MenuTarget::Empty(view.to_scene(p)));
                 self.sel = match &target {
                     MenuTarget::Node(id) => Sel::Node(id.clone()),
                     MenuTarget::Edge(i) => Sel::Edge(*i),
+                    MenuTarget::Group(id, _) => Sel::Group(id.clone()),
                     MenuTarget::Empty(_) => Sel::None,
                 };
                 self.link_from = None;
@@ -1940,10 +2134,14 @@ impl App {
         // Screenshot mode only: the menu of a node, opened without a click.
         if self.frames >= 60 {
             if let Some(id) = self.shot.as_mut().and_then(|s| s.menu.take()) {
-                if let Some(b) = self.flow().and_then(|f| f.node_index(&id)).and_then(|i| scene.node_boxes.get(i)) {
-                    let p = view.to_screen(b.center());
-                    self.sel = Sel::Node(id.clone());
-                    self.menu_target = Some(MenuTarget::Node(id));
+                let node = self.flow().and_then(|f| f.node_index(&id)).and_then(|i| scene.node_boxes.get(i)).map(|b| b.center());
+                // A group id opens the menu of the group, at a point inside its frame near the corner.
+                let group = self.flow().and_then(|f| f.subgraph_index(&id)).and_then(|i| scene.cluster_boxes.get(i)).map(|b| (b.x + b.w - 14.0, b.y + b.h - 10.0));
+                if let Some(c) = node.or(group) {
+                    let p = view.to_screen(c);
+                    let (sel, target) = if node.is_some() { (Sel::Node(id.clone()), MenuTarget::Node(id)) } else { (Sel::Group(id.clone()), MenuTarget::Group(id, c)) };
+                    self.sel = sel;
+                    self.menu_target = Some(target);
                     self.menu_text = self.text.clone();
                     if let Some(shot) = &mut self.shot {
                         shot.menu_at = Some(p);
@@ -2752,5 +2950,188 @@ mod gestures {
             Some(MenuTarget::Edge(n)) => assert_eq!((f.edges[*n].from.as_str(), f.edges[*n].label.as_deref()), ("A", Some("x")), "{}", h.app.text),
             other => panic!("{other:?}"),
         }
+    }
+
+    const SRC_G: &str = "flowchart TD\n  subgraph G1[\"Entrada\"]\n    A[Um] --> B[Dois]\n  end\n  C[Tres] --> G1\n  D[Quatro]\n";
+
+    impl Harness {
+        /// A point on the title strip of a group, and a point inside its frame away from the nodes.
+        fn group_points(&self, id: &str) -> (Pos2, Pos2) {
+            let i = self.app.flow().and_then(|f| f.subgraph_index(id)).expect("group");
+            let b = self.app.scene.as_ref().and_then(|s| s.cluster_boxes.get(i).copied()).expect("frame");
+            let o = self.app.canvas_rect.expect("canvas").min + self.app.pan;
+            let at = |x: f32, y: f32| Pos2::new(o.x + x * self.app.zoom, o.y + y * self.app.zoom);
+            (at(b.x + b.w - 14.0, b.y + 12.0), at(b.x + b.w - 8.0, b.y + b.h - 8.0))
+        }
+
+        fn group_of(&self, node: &str) -> Option<String> {
+            let f = self.app.flow()?;
+            let n = f.nodes.get(f.node_index(node)?)?;
+            n.parent.and_then(|p| f.subgraphs.get(p)).map(|g| g.id.clone())
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_title_selects_the_group_and_a_drag_moves_it() {
+        let mut h = Harness::new(SRC_G);
+        let (title, inside) = h.group_points("G1");
+        h.click(title);
+        assert_eq!(h.app.sel, Sel::Group("G1".into()));
+        h.wait();
+        // The rest of the frame is empty space.
+        h.click(inside);
+        assert_eq!(h.app.sel, Sel::None);
+        h.wait();
+        h.drag(title, title + egui::vec2(50.0, 0.0), Modifiers::NONE);
+        assert!(h.app.text.contains("sub:G1="), "{}", h.app.text);
+        assert_eq!(h.app.sel, Sel::Group("G1".into()));
+    }
+
+    #[test]
+    fn the_group_menu_selects_it_and_offers_its_actions() {
+        let mut h = Harness::new(SRC_G);
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        assert!(h.menu_open());
+        assert_eq!(h.app.sel, Sel::Group("G1".into()));
+        let items = h.items().join(" ");
+        for want in ["Rename", "sub:Colour", "sub:Outline", "NewHere", "Ungroup", "Delete"] {
+            assert!(items.contains(want), "{want} missing in {items}");
+        }
+        assert!(!items.contains("sub:Shape") && !items.contains("LinkTo"), "{items}");
+    }
+
+    #[test]
+    fn rename_the_group_and_keep_its_id() {
+        let mut h = Harness::new(SRC_G);
+        let (title, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["Rename"]);
+        h.step(Vec::new(), Modifiers::NONE);
+        assert!(App::label_focused(&h.ctx));
+        h.step(vec![Event::Text("Chegada".into())], Modifiers::NONE);
+        h.key(Key::Enter);
+        assert!(h.app.text.contains("subgraph G1[\"Chegada\"]"), "{}", h.app.text);
+        assert!(h.app.text.contains("C[Tres] --> G1"));
+        // F2 and a double click on the title open it too.
+        h.wait();
+        h.click(inside);
+        h.click(title);
+        h.key(Key::F2);
+        assert!(App::label_focused(&h.ctx));
+    }
+
+    #[test]
+    fn colour_and_outline_of_a_group() {
+        let mut h = Harness::new(SRC_G);
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["sub:Colour", "Colour(Some"]);
+        assert!(h.app.text.contains("style G1 fill:"), "{}", h.app.text);
+        assert_eq!(h.app.sel, Sel::Group("G1".into()));
+        h.wait();
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["sub:Outline", "Dashed(false)"]);
+        assert!(h.app.text.contains("stroke-dasharray:0"), "{}", h.app.text);
+        h.wait();
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["sub:Outline", "Dashed(true)"]);
+        assert!(h.app.text.contains("stroke-dasharray:5 5"), "{}", h.app.text);
+        assert_eq!(h.app.sel, Sel::Group("G1".into()));
+    }
+
+    #[test]
+    fn move_a_node_into_a_group_out_of_it_and_into_a_new_one() {
+        let mut h = Harness::new(SRC_G);
+        let d = h.node("D");
+        h.right_click(d);
+        h.choose(&["sub:Move to group", "MoveTo(Some(0))"]);
+        assert_eq!(h.group_of("D").as_deref(), Some("G1"), "{}", h.app.text);
+        h.wait();
+        let b = h.node("B");
+        h.right_click(b);
+        h.choose(&["sub:Move to group", "MoveTo(None)"]);
+        assert_eq!(h.group_of("B"), None, "{}", h.app.text);
+        assert!(h.app.flow().is_some_and(|f| f.edges.iter().any(|e| e.from == "A" && e.to == "B")));
+        h.wait();
+        let c = h.node("C");
+        h.right_click(c);
+        h.choose(&["sub:Move to group", "NewGroup"]);
+        assert_eq!(h.app.sel, Sel::Group("G2".into()), "{}", h.app.text);
+        assert_eq!(h.group_of("C").as_deref(), Some("G2"));
+        h.step(Vec::new(), Modifiers::NONE);
+        assert!(App::label_focused(&h.ctx), "the title of the new group should be open");
+    }
+
+    #[test]
+    fn a_new_node_from_the_group_menu_lands_inside_it() {
+        let mut h = Harness::new(SRC_G);
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["NewHere"]);
+        let Sel::Node(new) = h.app.sel.clone() else { panic!("{:?}", h.app.sel) };
+        assert_eq!(h.group_of(&new).as_deref(), Some("G1"), "{}", h.app.text);
+    }
+
+    #[test]
+    fn ungroup_keeps_the_content_and_says_what_went() {
+        let mut h = Harness::new(SRC_G);
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["Ungroup"]);
+        let f = h.app.flow().expect("flow");
+        assert!(f.subgraphs.is_empty(), "{}", h.app.text);
+        assert_eq!(f.nodes.len(), 4);
+        assert_eq!(h.app.sel, Sel::None);
+        let (msg, _) = h.app.status.clone().expect("a message");
+        assert!(msg.starts_with("1 "), "{msg}");
+    }
+
+    #[test]
+    fn delete_removes_the_group_with_its_content_and_undo_brings_it_back() {
+        let mut h = Harness::new(SRC_G);
+        let (title, _) = h.group_points("G1");
+        h.click(title);
+        h.wait();
+        h.key(Key::Delete);
+        assert!(!h.app.text.contains('A') || !h.app.text.contains("subgraph"), "{}", h.app.text);
+        let f = h.app.flow().expect("flow");
+        assert!(f.subgraphs.is_empty() && f.node_index("A").is_none() && f.node_index("C").is_some() && f.node_index("D").is_some(), "{}", h.app.text);
+        h.app.undo(h.t);
+        assert_eq!(h.app.text, SRC_G);
+        // And from the menu.
+        h.wait();
+        let (_, inside) = h.group_points("G1");
+        h.right_click(inside);
+        h.choose(&["Delete"]);
+        assert!(h.app.flow().is_some_and(|f| f.subgraphs.is_empty()), "{}", h.app.text);
+    }
+
+    #[test]
+    fn an_empty_group_title_is_refused_with_a_message_and_a_hand_written_zero_dash_stays_dashed_for_nodes() {
+        let mut h = Harness::new("flowchart TD\n  subgraph G1[\"Entrada\"]\n    A\n  end\n  style A stroke-dasharray:0\n");
+        let (title, _) = h.group_points("G1");
+        h.click(title);
+        h.key(Key::F2);
+        h.step(vec![Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND }], Modifiers::COMMAND);
+        h.step(vec![Event::Key { key: Key::Backspace, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+        h.step(vec![Event::Key { key: Key::Backspace, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+        h.key(Key::Enter);
+        assert!(h.app.text.contains("subgraph G1[\"Entrada\"]"), "{}", h.app.text);
+        let styles = h.app.flow().map(|f| edit::own_node_style(&h.app.text, f, "A")).unwrap_or_default();
+        assert!(h.app.outline_dashed("A", &styles));
+        assert!(!h.app.outline_dashed("G1", &engine::StyleMap::from([("stroke-dasharray".to_string(), "0".to_string())])));
+    }
+
+    #[test]
+    fn a_text_with_an_error_leaves_the_group_edits_undone() {
+        let mut h = Harness::new("flowchart TD\n  subgraph G1[\"Entrada\"]\n    A --> B\n  end\n  A -->\n");
+        let before = h.app.text.clone();
+        h.app.run_menu(MenuTarget::Group("G1".into(), (0.0, 0.0)), MenuAction::Ungroup, h.t);
+        assert_eq!(h.app.text, before);
+        let (msg, _) = h.app.status.clone().expect("the reason is shown");
+        assert!(msg.contains("error"), "{msg}");
     }
 }
