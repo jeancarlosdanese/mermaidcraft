@@ -1313,9 +1313,11 @@ impl App {
         if let Some((byte, line, focused)) = cursor_at {
             if focused && self.cursor_byte != Some(byte) {
                 self.cursor_byte = Some(byte);
-                let found = self.flow().and_then(|f| edit::item_at(f, byte, line)).map(|it| match it {
-                    edit::TextItem::Node(id) => Sel::Node(id),
-                    edit::TextItem::Edge(i) => Sel::Edge(i),
+                let found = self.flow().and_then(|f| edit::item_at(f, byte, line)).and_then(|it| match it {
+                    edit::TextItem::Node(id) => Some(Sel::Node(id)),
+                    edit::TextItem::Edge(i) => Some(Sel::Edge(i)),
+                    // A group is selected from the canvas only after phase B of the groups FEAT.
+                    edit::TextItem::Group(_) => None,
                 });
                 if let Some(sel) = found {
                     if sel != self.sel {

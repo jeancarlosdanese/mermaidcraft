@@ -33,6 +33,20 @@ impl std::fmt::Display for EditError {
 impl std::error::Error for EditError {}
 
 fn load(src: &str) -> Result<Flowchart, EditError> {
+    load_with(src).map(|(fc, _)| fc)
+}
+
+/// Like `load`, but refuses a text that has syntax errors: structural edits of groups would
+/// otherwise build on a parse that is wrong.
+fn load_checked(src: &str) -> Result<Flowchart, EditError> {
+    let (fc, diags) = load_with(src)?;
+    match diags.iter().find(|d| d.severity == Severity::Error) {
+        Some(d) => Err(EditError::Invalid(format!("fix the error on line {} first: {}", d.line, d.message))),
+        None => Ok(fc),
+    }
+}
+
+fn load_with(src: &str) -> Result<(Flowchart, Vec<Diagnostic>), EditError> {
     if src.len() > MAX_SOURCE_BYTES {
         return Err(EditError::Invalid("the diagram is too large".into()));
     }
@@ -44,7 +58,8 @@ fn load(src: &str) -> Result<Flowchart, EditError> {
         return Err(EditError::NotFlowchart);
     }
     let mut d = Vec::new();
-    Ok(flowchart::parse(&lines, first, &mut d))
+    let fc = flowchart::parse(&lines, first, &mut d);
+    Ok((fc, d))
 }
 
 fn valid_id(id: &str) -> bool {
@@ -170,19 +185,22 @@ struct Removals {
     nodes: HashSet<String>,
     /// Edge indexes.
     edges: HashSet<usize>,
+    /// When set, `nodes` are removed only from these statements (`style` and `class` lines stay).
+    scope: Option<HashSet<usize>>,
 }
 
 fn rebuild(src: &str, fc: &Flowchart, rm: &Removals) -> Result<String, EditError> {
     let mut edits: Vec<(Span, String)> = Vec::new();
+    let gone = |si: usize, id: &str| rm.nodes.contains(id) && rm.scope.as_ref().is_none_or(|s| s.contains(&si));
     for (si, st) in fc.statements.iter().enumerate() {
         let text_of = |s: Span| src.get(s.start..s.end).unwrap_or("").to_string();
         match &st.kind {
             StmtKind::Chain { groups, links } => {
-                let touched = groups.iter().any(|g| g.nodes.iter().any(|n| rm.nodes.contains(&n.id))) || fc.edges.iter().enumerate().any(|(ei, e)| e.stmt == si && rm.edges.contains(&ei));
+                let touched = groups.iter().any(|g| g.nodes.iter().any(|n| gone(si, &n.id))) || fc.edges.iter().enumerate().any(|(ei, e)| e.stmt == si && rm.edges.contains(&ei));
                 if !touched {
                     continue;
                 }
-                let remaining: Vec<Vec<&NodeRef>> = groups.iter().map(|g| g.nodes.iter().filter(|n| !rm.nodes.contains(&n.id)).collect()).collect();
+                let remaining: Vec<Vec<&NodeRef>> = groups.iter().map(|g| g.nodes.iter().filter(|n| !gone(si, &n.id)).collect()).collect();
                 let intact: Vec<bool> = groups.iter().zip(&remaining).map(|(g, r)| g.nodes.len() == r.len()).collect();
                 let link_removed = |li: usize| -> bool {
                     fc.edges.iter().enumerate().any(|(ei, e)| e.stmt == si && e.link == li && rm.edges.contains(&ei))
@@ -246,7 +264,7 @@ fn rebuild(src: &str, fc: &Flowchart, rm: &Removals) -> Result<String, EditError
                 edits.push((st.span, text));
             }
             StmtKind::Keyword { word, ids } => {
-                if !matches!(word.as_str(), "style" | "class") || !ids.iter().any(|n| rm.nodes.contains(&n.id)) {
+                if rm.scope.is_some() || !matches!(word.as_str(), "style" | "class") || !ids.iter().any(|n| rm.nodes.contains(&n.id)) {
                     continue;
                 }
                 let keep: Vec<&NodeRef> = ids.iter().filter(|n| !rm.nodes.contains(&n.id)).collect();
@@ -416,8 +434,11 @@ pub fn own_node_style(src: &str, fc: &Flowchart, id: &str) -> StyleMap {
 /// Adds a line before the `%% mermaidcraft:layout` comment (or at the end), with the file's own
 /// line break.
 fn insert_line(src: &str, line: &str) -> String {
+    insert_line_with(src, line, &indent_of(src))
+}
+
+fn insert_line_with(src: &str, line: &str, indent: &str) -> String {
     let nl = if src.contains("\r\n") { "\r\n" } else { "\n" };
-    let indent = indent_of(src);
     let mut at = 0usize;
     for raw in src.split_inclusive('\n') {
         if raw.trim_start().starts_with(flowchart::LAYOUT_COMMENT) {
@@ -437,7 +458,7 @@ fn insert_line(src: &str, line: &str) -> String {
 /// Shared `style A,B ...` lines are kept. An empty map removes the node's own lines.
 pub fn set_node_style(src: &str, id: &str, props: &StyleMap) -> Result<String, EditError> {
     let fc = load(src)?;
-    if fc.node_index(id).is_none() {
+    if fc.node_index(id).is_none() && fc.subgraph_index(id).is_none() {
         return Err(EditError::NoSuchNode(id.to_string()));
     }
     let bad = |t: &str| t.trim().is_empty() || t.contains([',', ';', '\n', '\r']);
@@ -456,19 +477,306 @@ pub fn set_node_style(src: &str, id: &str, props: &StyleMap) -> Result<String, E
     if props.is_empty() { Ok(out) } else { Ok(insert_line(&out, &line)) }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Groups (subgraph)
+// ---------------------------------------------------------------------------------------------
+
+/// The innermost group around each statement. The `subgraph` and `end` lines belong to the group
+/// outside them.
+fn owners(fc: &Flowchart) -> Vec<Option<usize>> {
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next = 0usize;
+    let mut out = Vec::with_capacity(fc.statements.len());
+    for st in &fc.statements {
+        match &st.kind {
+            StmtKind::Keyword { word, .. } if word == "subgraph" => {
+                out.push(stack.last().copied());
+                stack.push(next);
+                next += 1;
+            }
+            StmtKind::Keyword { word, .. } if word == "end" => {
+                stack.pop();
+                out.push(stack.last().copied());
+            }
+            _ => out.push(stack.last().copied()),
+        }
+    }
+    out
+}
+
+/// Indentation of the statements that sit outside every group.
+fn base_indent(src: &str, fc: &Flowchart, owners: &[Option<usize>]) -> String {
+    let loose = fc.statements.iter().enumerate().find(|(si, _)| owners.get(*si).copied().flatten().is_none());
+    loose.or_else(|| fc.statements.iter().enumerate().next()).map_or_else(|| "    ".to_string(), |(_, st)| line_indent(src, st.span.start))
+}
+
+fn group_index(fc: &Flowchart, id: &str) -> Result<usize, EditError> {
+    fc.subgraph_index(id).ok_or_else(|| EditError::Invalid(format!("there is no group '{id}'")))
+}
+
+/// `["Title"]` as written after the id in a `subgraph` line.
+fn group_title_text(title: &str) -> Result<String, EditError> {
+    let t = title.trim();
+    if t.is_empty() {
+        return Err(EditError::Invalid("a group needs a title".into()));
+    }
+    Ok(format!("[\"{}\"]", t.replace(['\n', '\r'], "<br/>").replace('"', "#quot;")))
+}
+
+/// Changes the title of a group and keeps its id (a header without an id of its own gets the one
+/// the parser derived, so links and moved positions keep working).
+pub fn rename_group(src: &str, id: &str, title: &str) -> Result<String, EditError> {
+    let fc = load_checked(src)?;
+    let sg = fc.subgraphs.get(group_index(&fc, id)?).ok_or_else(|| EditError::Invalid(format!("there is no group '{id}'")))?;
+    apply(src, vec![(sg.header, format!("subgraph {id}{}", group_title_text(title)?))])
+}
+
+/// A group name nothing uses yet: G1, G2, ...
+fn fresh_group_id(fc: &Flowchart) -> String {
+    (1..)
+        .map(|n| format!("G{n}"))
+        .find(|id| fc.node_index(id).is_none() && fc.subgraph_index(id).is_none())
+        .unwrap_or_else(|| "G".to_string())
+}
+
+/// Adds `line` just before the `end` of group `g`, one level deeper than the `end`.
+fn insert_before_end(src: &str, fc: &Flowchart, owners: &[Option<usize>], g: usize, line: &str) -> Result<String, EditError> {
+    let sg = fc.subgraphs.get(g).ok_or_else(|| EditError::Invalid("there is no such group".into()))?;
+    let end = sg.end.ok_or_else(|| EditError::Invalid("the group is missing its 'end'".into()))?;
+    let nl = if src.contains("\r\n") { "\r\n" } else { "\n" };
+    let line_start = src.get(..end.start).map_or(0, |t| t.rfind('\n').map_or(0, |i| i + 1));
+    let lead = src.get(line_start..end.start).unwrap_or("");
+    if !lead.chars().all(char::is_whitespace) {
+        // `end` shares its line with other statements.
+        return apply(src, vec![(Span::new(end.start, end.start), format!("{line}; "))]);
+    }
+    let inner = fc
+        .statements
+        .iter()
+        .enumerate()
+        .find(|(si, st)| owners.get(*si).copied().flatten() == Some(g) && st.span.start >= sg.header.end && st.span.end <= end.start)
+        .map(|(_, st)| line_indent(src, st.span.start))
+        .filter(|i| i.len() > lead.len())
+        .unwrap_or_else(|| format!("{lead}  "));
+    apply(src, vec![(Span::new(line_start, line_start), format!("{inner}{line}{nl}"))])
+}
+
+/// Puts a node inside group `dest`, or outside every group when `dest` is None. The label, shape,
+/// style and links of the node stay. Its lines inside groups are cut: a link in such a line goes to
+/// a line of its own outside the groups, and the other nodes of the line stay where they were.
+pub fn move_to_group(src: &str, node: &str, dest: Option<&str>) -> Result<String, EditError> {
+    let fc = load_checked(src)?;
+    let ni = fc.node_index(node).ok_or_else(|| EditError::NoSuchNode(node.to_string()))?;
+    let n = fc.nodes.get(ni).ok_or_else(|| EditError::NoSuchNode(node.to_string()))?;
+    let dest_idx = match dest {
+        Some(g) => Some(group_index(&fc, g)?),
+        None => None,
+    };
+    let own = owners(&fc);
+    // Mentioned inside some other group too: the move still has work to do.
+    let elsewhere = fc.statements.iter().enumerate().any(|(si, st)| matches!(&st.kind, StmtKind::Chain { groups, .. } if groups.iter().any(|g| g.nodes.iter().any(|r| r.id == node))) && own.get(si).copied().flatten().is_some_and(|g| Some(g) != dest_idx));
+    if n.parent == dest_idx && !elsewhere {
+        return Ok(src.to_string());
+    }
+    let text_of = |s: Span| src.get(s.start..s.end).unwrap_or("").to_string();
+    let mentions = |st: &Stmt| match &st.kind {
+        StmtKind::Chain { groups, .. } => groups.iter().any(|g| g.nodes.iter().any(|r| r.id == node)),
+        StmtKind::Keyword { .. } => false,
+    };
+    let in_group: HashSet<usize> = fc.statements.iter().enumerate().filter(|(si, st)| own.get(*si).copied().flatten().is_some() && mentions(st)).map(|(si, _)| si).collect();
+    let refs = || fc.statements.iter().filter_map(|st| if let StmtKind::Chain { groups, .. } = &st.kind { Some(groups) } else { None }).flatten().flat_map(|g| g.nodes.iter()).filter(|r| r.id == node);
+    let def = refs().find(|r| r.has_def).or_else(|| refs().next()).map_or_else(|| node.to_string(), |r| text_of(r.span));
+    let mut readd: Vec<String> = Vec::new();
+    for e in fc.edges.iter().filter(|e| (e.from == node || e.to == node) && in_group.contains(&e.stmt)) {
+        if let Some(Stmt { kind: StmtKind::Chain { links, .. }, .. }) = fc.statements.get(e.stmt) {
+            if let Some(l) = links.get(e.link) {
+                readd.push(format!("{} {} {}", e.from, text_of(l.span), e.to));
+            }
+        }
+    }
+    let base = base_indent(src, &fc, &own);
+    // Moving into a group: a loose line that holds only this node (`D` or `D[Label]`) is redundant.
+    let mut scope = in_group.clone();
+    if dest_idx.is_some() {
+        let alone = |st: &Stmt| matches!(&st.kind, StmtKind::Chain { groups, .. } if matches!(groups.as_slice(), [g] if matches!(g.nodes.as_slice(), [r] if r.id == node)));
+        scope.extend(fc.statements.iter().enumerate().filter(|(si, st)| !in_group.contains(si) && alone(st)).map(|(si, _)| si));
+    }
+    let mut text = src.to_string();
+    if !scope.is_empty() {
+        let rm = Removals { nodes: HashSet::from([node.to_string()]), edges: HashSet::new(), scope: Some(scope) };
+        text = rebuild(src, &fc, &rm)?;
+    }
+    let fc2 = load_checked(&text)?;
+    let mut root_lines: Vec<String> = Vec::new();
+    match dest {
+        Some(g) => {
+            let own2 = owners(&fc2);
+            let gi = group_index(&fc2, g)?;
+            text = insert_before_end(&text, &fc2, &own2, gi, &def)?;
+        }
+        None => {
+            let lost = match fc2.node_index(node).and_then(|i| fc2.nodes.get(i)) {
+                None => true,
+                Some(m) => n.def_span.is_some() && m.def_span.is_none(),
+            };
+            if lost {
+                root_lines.push(def);
+            }
+        }
+    }
+    root_lines.extend(readd);
+    let mut text = insert_root_lines(&text, &root_lines, &base)?;
+    // The parser gives a class only to a node it has already met, so a `class` line that now comes
+    // before the node (or a `:::class` on a mention that was cut) is said again after it.
+    let fc3 = load_checked(&text)?;
+    let kept = fc3.node_index(node).and_then(|i| fc3.nodes.get(i)).map(|m| m.classes.clone()).unwrap_or_default();
+    for c in n.classes.iter().filter(|c| !kept.contains(c)) {
+        text = insert_line_with(&text, &format!("class {node} {c}"), &base);
+    }
+    Ok(text)
+}
+
+/// Adds lines outside the groups, before the first `class` line when there is one (the parser
+/// only gives a class to a node it has already met) and otherwise at the end.
+fn insert_root_lines(src: &str, lines: &[String], indent: &str) -> Result<String, EditError> {
+    if lines.is_empty() {
+        return Ok(src.to_string());
+    }
+    let fc = load_checked(src)?;
+    let nl = if src.contains("\r\n") { "\r\n" } else { "\n" };
+    let own = owners(&fc);
+    let class_at = fc.statements.iter().enumerate().find(|(si, st)| own.get(*si).copied().flatten().is_none() && matches!(&st.kind, StmtKind::Keyword { word, .. } if word == "class")).map(|(_, st)| st.span.start);
+    if let Some(at) = class_at {
+        let line_start = src.get(..at).map_or(0, |t| t.rfind('\n').map_or(0, |i| i + 1));
+        if src.get(line_start..at).is_some_and(|lead| lead.chars().all(char::is_whitespace)) {
+            let block: String = lines.iter().map(|l| format!("{indent}{l}{nl}")).collect();
+            return apply(src, vec![(Span::new(line_start, line_start), block)]);
+        }
+    }
+    Ok(lines.iter().fold(src.to_string(), |t, l| insert_line_with(&t, l, indent)))
+}
+
+/// Wraps a node in a new group. Returns the new text and the id of the group.
+pub fn new_group(src: &str, node: &str, title: &str) -> Result<(String, String), EditError> {
+    let fc = load_checked(src)?;
+    if fc.node_index(node).is_none() {
+        return Err(EditError::NoSuchNode(node.to_string()));
+    }
+    let id = fresh_group_id(&fc);
+    let base = base_indent(src, &fc, &owners(&fc));
+    let with = insert_line_with(src, &format!("subgraph {id}{}", group_title_text(title)?), &base);
+    let with = insert_line_with(&with, "end", &base);
+    Ok((move_to_group(&with, node, Some(&id))?, id))
+}
+
+/// Cuts the `subgraph` and `end` lines of a group and its own `direction`; what was inside stays.
+fn strip_group(src: &str, id: &str) -> Result<String, EditError> {
+    let fc = load_checked(src)?;
+    let g = group_index(&fc, id)?;
+    let sg = fc.subgraphs.get(g).ok_or_else(|| EditError::Invalid(format!("there is no group '{id}'")))?;
+    let own = owners(&fc);
+    let mut edits: Vec<(Span, String)> = vec![(sg.header, "\u{0}".to_string())];
+    if let Some(end) = sg.end {
+        edits.push((end, "\u{0}".to_string()));
+    }
+    for (si, st) in fc.statements.iter().enumerate() {
+        if own.get(si).copied().flatten() == Some(g) && matches!(&st.kind, StmtKind::Keyword { word, .. } if word == "direction") {
+            edits.push((st.span, "\u{0}".to_string()));
+        }
+    }
+    // What was inside moves one level to the left, when the group sat on lines of its own.
+    if let Some(end) = sg.end {
+        let outer = line_indent(src, sg.header.start);
+        let first = fc.statements.iter().enumerate().find(|(si, st)| own.get(*si).copied().flatten() == Some(g) && st.span.start >= sg.header.end && st.span.end <= end.start);
+        let alone = |at: usize, before: bool| {
+            let line = if before { src.get(..at).map_or("", |t| t.rsplit('\n').next().unwrap_or("")) } else { src.get(at..).map_or("", |t| t.split('\n').next().unwrap_or("")) };
+            line.trim_matches([' ', '\t', '\r', ';']).is_empty()
+        };
+        if let (Some((_, first)), true, true) = (first, alone(sg.header.start, true) && alone(sg.header.end, false), alone(end.start, true) && alone(end.end, false)) {
+            let inner = line_indent(src, first.span.start);
+            if inner.len() > outer.len() && inner.starts_with(&outer) {
+                let mut at = src.get(sg.header.end..).and_then(|t| t.find('\n')).map(|i| sg.header.end + i + 1);
+                while let Some(ls) = at.filter(|ls| *ls < end.start) {
+                    if src.get(ls..).is_some_and(|t| t.starts_with(&inner)) {
+                        edits.push((Span::new(ls + outer.len(), ls + inner.len()), String::new()));
+                    }
+                    at = src.get(ls..).and_then(|t| t.find('\n')).map(|i| ls + i + 1);
+                }
+            }
+        }
+    }
+    Ok(clean_markers(&apply(src, edits)?))
+}
+
+/// Forgets the moved positions of groups that no longer exist.
+fn drop_group_offsets(src: &str, ids: &[String]) -> Result<String, EditError> {
+    let fc = load(src)?;
+    let mut offsets = fc.offsets.clone();
+    let before = offsets.len();
+    for id in ids {
+        offsets.remove(&flowchart::group_offset_key(id));
+    }
+    if offsets.len() == before {
+        return Ok(src.to_string());
+    }
+    set_offsets(src, &offsets)
+}
+
+/// Undoes a group: its lines go and what was inside moves up to the group outside. Links that
+/// pointed at the group go too (without it the id would become a new node); the number of links
+/// that went is returned.
+pub fn ungroup(src: &str, id: &str) -> Result<(String, usize), EditError> {
+    let fc = load_checked(src)?;
+    group_index(&fc, id)?;
+    let arrows = fc.edges.iter().filter(|e| e.from == id || e.to == id).count();
+    let rm = Removals { nodes: HashSet::from([id.to_string()]), ..Removals::default() };
+    let text = strip_group(&rebuild(src, &fc, &rm)?, id)?;
+    Ok((drop_group_offsets(&text, &[id.to_string()])?, arrows))
+}
+
+/// Deletes a group with the groups, nodes and links inside it.
+pub fn remove_group(src: &str, id: &str) -> Result<String, EditError> {
+    let fc = load_checked(src)?;
+    let g = group_index(&fc, id)?;
+    let inside = |mut p: Option<usize>| {
+        while let Some(k) = p {
+            if k == g {
+                return true;
+            }
+            p = fc.subgraphs.get(k).and_then(|s| s.parent);
+        }
+        false
+    };
+    let subs: Vec<String> = fc.subgraphs.iter().enumerate().filter(|(k, _)| inside(Some(*k))).map(|(_, s)| s.id.clone()).collect();
+    let mut rm = Removals::default();
+    rm.nodes.extend(subs.iter().cloned());
+    rm.nodes.extend(fc.nodes.iter().filter(|n| inside(n.parent)).map(|n| n.id.clone()));
+    let mut text = rebuild(src, &fc, &rm)?;
+    for sid in &subs {
+        text = strip_group(&text, sid)?;
+    }
+    drop_group_offsets(&text, &subs)
+}
+
 /// What a place of the text names: a node or an edge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextItem {
     Node(String),
     Edge(usize),
+    Group(String),
 }
 
 /// The node or edge at byte `at` of the text: the id or link under the cursor, else the first node
-/// of a statement on `line` (1-based). Group ids are not nodes, and a link drawn as several edges
+/// of a statement on `line` (1-based); a `subgraph` line or a group id names the group. A link drawn as several edges
 /// (`A & B --> C`) names none of them.
 pub fn item_at(fc: &Flowchart, at: usize, line: usize) -> Option<TextItem> {
     let inside = |sp: &Span| sp.start <= at && at <= sp.end;
-    let node = |r: &NodeRef| fc.node_index(&r.id).map(|_| TextItem::Node(r.id.clone()));
+    let node = |r: &NodeRef| match (fc.node_index(&r.id), fc.subgraph_index(&r.id)) {
+        (Some(_), _) => Some(TextItem::Node(r.id.clone())),
+        (None, Some(_)) => Some(TextItem::Group(r.id.clone())),
+        (None, None) => None,
+    };
+    let header = |st: &Stmt| fc.subgraphs.iter().find(|s| s.header == st.span).map(|s| TextItem::Group(s.id.clone()));
     for (si, st) in fc.statements.iter().enumerate() {
         if !inside(&st.span) {
             continue;
@@ -486,7 +794,10 @@ pub fn item_at(fc: &Flowchart, at: usize, line: usize) -> Option<TextItem> {
                     };
                 }
             }
-            StmtKind::Keyword { ids, .. } => {
+            StmtKind::Keyword { word, ids } => {
+                if word == "subgraph" {
+                    return header(st);
+                }
                 if let Some(r) = ids.iter().find(|r| inside(&r.span)) {
                     return node(r);
                 }
@@ -496,6 +807,7 @@ pub fn item_at(fc: &Flowchart, at: usize, line: usize) -> Option<TextItem> {
     fc.statements.iter().filter(|st| st.line == line).find_map(|st| match &st.kind {
         StmtKind::Chain { groups, .. } => groups.first().and_then(|g| g.nodes.first()).and_then(node),
         StmtKind::Keyword { word, ids } if word == "style" || word == "class" => ids.first().and_then(node),
+        StmtKind::Keyword { word, .. } if word == "subgraph" => header(st),
         StmtKind::Keyword { .. } => None,
     })
 }

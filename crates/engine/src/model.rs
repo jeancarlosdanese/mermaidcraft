@@ -287,6 +287,10 @@ pub struct Subgraph {
     pub parent: Option<usize>,
     pub direction: Option<Direction>,
     pub line: usize,
+    /// Text range of the `subgraph ...` statement.
+    pub header: Span,
+    /// Text range of the matching `end` (None while the `end` is missing).
+    pub end: Option<Span>,
 }
 
 /// One id inside a statement, with its text range.

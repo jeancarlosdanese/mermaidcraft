@@ -294,6 +294,58 @@ fn cluster_colors(mode: ColorMode, s: usize) -> (Color, Color, bool, Color) {
     }
 }
 
+/// The frame of a group with its own `style <id> ...` line applied: `fill`, `stroke`,
+/// `stroke-width`, `stroke-dasharray` (`0` or `none` draws it solid) and `color` (the title).
+struct ClusterLook {
+    fill: Color,
+    stroke: Color,
+    width: f32,
+    dash: Option<(f32, f32)>,
+    title: Color,
+}
+
+fn cluster_look(fc: &Flowchart, id: &str, base: (Color, Color, bool, Color)) -> ClusterLook {
+    let (fill, stroke, dashed, title) = base;
+    let mut l = ClusterLook { fill, stroke, width: 1.6, dash: if dashed { Some((7.0, 5.0)) } else { None }, title };
+    for (k, v) in fc.node_styles.get(id).into_iter().flatten() {
+        match k.as_str() {
+            "fill" => l.fill = parse_color(v).unwrap_or(l.fill),
+            "stroke" => l.stroke = parse_color(v).unwrap_or(l.stroke),
+            "color" => l.title = parse_color(v).unwrap_or(l.title),
+            "stroke-width" => {
+                if let Ok(w) = v.trim_end_matches("px").trim().parse::<f32>() {
+                    l.width = w.clamp(0.0, 20.0);
+                }
+            }
+            "stroke-dasharray" => {
+                let nums: Vec<f32> = v.split([' ', ',']).filter_map(|x| x.trim().parse::<f32>().ok()).collect();
+                l.dash = match nums.as_slice() {
+                    [] if v.trim() == "none" => None,
+                    [a, b, ..] if *a > 0.0 => Some((a.clamp(0.5, 50.0), b.clamp(0.5, 50.0))),
+                    [a] if *a > 0.0 => Some((a.clamp(0.5, 50.0), a.clamp(0.5, 50.0))),
+                    [..] => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    l
+}
+
+/// Bends a route that crosses the title band `r` of a frame so it goes past the title, on its
+/// right: an arrow into the group enters beside the title, one leaving the group leaves beside it.
+fn avoid_title(pts: &mut Vec<P>, r: &Rect, frame: &Rect) {
+    let xr = (r.x + r.w + 4.0).min(frame.x + frame.w - 10.0);
+    let (above, below) = (r.y - 4.0, r.y + r.h + 4.0);
+    for _ in 0..4 {
+        let hit = pts.windows(2).position(|w| matches!(w, [a, b] if segment_hits_rect(*a, *b, r)));
+        let Some(i) = hit else { return };
+        let (Some(&p), Some(&q)) = (pts.get(i), pts.get(i + 1)) else { return };
+        let via = if q.1 >= p.1 { [(xr, p.1.min(above)), (xr, below)] } else { [(xr, p.1.max(below)), (xr, above)] };
+        pts.splice(i + 1..i + 1, via);
+    }
+}
+
 /// Is `p` within `tol` of the polyline?
 fn near_path(path: &[P], p: P, tol: f32) -> bool {
     path.windows(2).any(|w| match w {
@@ -721,9 +773,17 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     for &s in &by_depth_asc {
         let b = sub_box.get(s).copied().unwrap_or_default();
         let tag = Tag::Cluster(s);
-        let (fill, stroke, dashed, title_col) = cluster_colors(opts.colors, s);
+        let look = match fc.subgraphs.get(s) {
+            Some(sg) => cluster_look(fc, &sg.id, cluster_colors(opts.colors, s)),
+            None => cluster_look(fc, "", cluster_colors(opts.colors, s)),
+        };
+        let title_col = look.title;
         let classic = opts.colors == ColorMode::Classic;
-        scene.push(Prim::new(PrimShape::Rect { x: b.x, y: b.y, w: b.w, h: b.h, r: if classic { 4.0 } else { 10.0 } }).fill(fill).stroke(stroke, 1.6).dash_if(dashed).tag(tag));
+        let mut frame = Prim::new(PrimShape::Rect { x: b.x, y: b.y, w: b.w, h: b.h, r: if classic { 4.0 } else { 10.0 } }).fill(look.fill).stroke(look.stroke, look.width).tag(tag);
+        if let Some((on, off)) = look.dash {
+            frame = frame.dash(on, off);
+        }
+        scene.push(frame);
         if let Some(sg) = fc.subgraphs.get(s) {
             if !sg.title.is_empty() {
                 let cy = b.y + 6.0 + label_size(&sg.title, TITLE_FONT, true, font).1 / 2.0;
@@ -762,6 +822,20 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
     scene.edge_paths = vec![Vec::new(); fc.edges.len()];
     let node_rects: Vec<Rect> = scene.node_boxes.clone();
     let cluster_rects: Vec<Rect> = sub_box.clone();
+    // The band of each frame that its title takes, which no arrow may cross.
+    let title_bands: Vec<Option<Rect>> = fc
+        .subgraphs
+        .iter()
+        .zip(&cluster_rects)
+        .map(|(sg, b)| {
+            if sg.title.is_empty() {
+                return None;
+            }
+            let (tw, th) = label_size(&sg.title, TITLE_FONT, true, font);
+            let left = if opts.colors == ColorMode::Classic { b.x + b.w / 2.0 - tw / 2.0 } else { b.x + 12.0 };
+            Some(Rect { x: left - 6.0, y: b.y, w: tw + 12.0, h: 12.0 + th })
+        })
+        .collect();
     // Is node `n` the end `it` of an edge, or inside it when the end is a frame?
     let within = |n: usize, it: Item| -> bool {
         match it {
@@ -811,6 +885,17 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         let holds = |sg: usize, it: Item| it == Item::Sub(sg) || path_of(fc, it).contains(&Item::Sub(sg));
         obstacles.extend(cluster_rects.iter().enumerate().filter(|(sg, _)| !holds(*sg, a) && !holds(*sg, b)).map(|(_, r)| Obstacle { rect: *r, outline: Outline::Box }));
         avoid_boxes(&mut pts, &obstacles, 14.0, &others);
+        let before = pts.len();
+        for (sg, band) in title_bands.iter().enumerate() {
+            let around = |it: Item| it != Item::Sub(sg) && path_of(fc, it).contains(&Item::Sub(sg));
+            if let (Some(band), Some(frame), true) = (band, cluster_rects.get(sg), around(a) || around(b)) {
+                avoid_title(&mut pts, band, frame);
+            }
+        }
+        if pts.len() != before {
+            // The detour may run into a node beside the title: bend around those again.
+            avoid_boxes(&mut pts, &obstacles, 14.0, &others);
+        }
         if let Some(slot) = routes.get_mut(ei) {
             *slot = Some(pts);
         }
