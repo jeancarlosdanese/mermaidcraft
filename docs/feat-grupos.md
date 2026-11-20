@@ -1,6 +1,6 @@
 # FEAT: grupos (`subgraph`) no canvas
 
-Estado: fases A e B implementadas na branch `feat/grupos`; fase B aguardando o "pode commitar" (0.8.0)
+Estado: fases A e B commitadas na branch `feat/grupos`; correções da revisão final aguardando o "pode commitar" (0.8.0)
 
 ## Problema
 
@@ -98,8 +98,11 @@ Sem duplicidade nem conflito. Nenhuma dependência nova.
    sem o grupo o id `G` viraria um nó novo; a barra de estado diz quantas saíram.
 8. **Apagar com o conteúdo** (menu, painel e tecla Delete com o grupo selecionado) apaga o grupo,
    os grupos de dentro, os nós deles e as setas desses nós, como o Delete de um nó. ⌘Z desfaz.
-9. **Seta e título.** Nenhum trecho de seta cruza o retângulo do título de um grupo. A seta que
-   entraria pela faixa do título entra ao lado dele.
+9. **Seta e título.** As setas seguem a rota do layout; quem sai do caminho é o título. Ele fica no
+   lugar de sempre (canto esquerdo, ou centro no visual clássico) quando nenhuma seta o cruza;
+   senão, vai para outro lugar livre do topo da moldura (o outro canto, o centro, ou ao lado de uma
+   seta). Sem lugar livre (moldura quase da largura do título), fica no lugar de sempre, desenhado
+   por cima das setas sobre um fundo da cor da moldura.
 10. **Fora do fluxograma** nada muda: o menu continua só com "Ajustar à janela".
 
 ## Critérios de aceite
@@ -194,7 +197,9 @@ Funcionalidade: grupos no canvas
   Cenário: seta não passa sobre o título
     Dado o fixture "fluxo-longo.mmd"
     Quando ele é desenhado
-    Então nenhum trecho de seta cruza o retângulo do título de nenhum grupo
+    Então nenhum trecho de seta cruza o retângulo do título de nenhum grupo, salvo um título
+    desenhado por cima das setas, sobre o fundo da moldura
+  E as setas têm o mesmo traçado que teriam sem os títulos
 ```
 
 ## Plano
@@ -303,6 +308,20 @@ Fase B:
 - **Novo nó aqui no grupo** é um passo de desfazer só (nó criado, posto no grupo e deslocado).
 - **Captura.** `MERMAIDCRAFT_SHOT_MENU` aceita também id de grupo.
 
+Revisão final (Opus, branch inteira), 5 achados, todos corrigidos:
+
+- **Desvio da seta trocado por título que muda de lugar** (regra 9 reescrita). O desvio da fase A
+  levava as setas para a direita do título e alongava muito as rotas (500 → 831 num grupo largo,
+  524 → 1392 num aninhado). Agora as rotas são as mesmas da `main`.
+- **Id de grupo repetido** (dois `subgraph Etapa`): as edições de grupo recusam, com mensagem pedindo
+  um id próprio, em vez de agir sobre o primeiro grupo.
+- **Nó definido duas vezes**: mover usa a última definição (a que vale) e, se o rótulo ou a forma
+  mudarem mesmo assim, regrava a definição no fim.
+- **`linkStyle` segue as setas.** Apagar nó ou seta, mudar seta, inverter, mover nó, desagrupar e
+  apagar grupo renumeram as linhas `linkStyle N`; um número cuja seta sumiu sai da lista, e a linha
+  vazia sai. Antes da 0.8.0 o "Inverter sentido" e as remoções já deixavam o `linkStyle` apontando
+  para outra seta; foi corrigido junto.
+
 ## Testes
 
 Fase A: 60 testes no motor (19 novos para grupos: spans, renomear, estilo na moldura, mover, novo
@@ -325,3 +344,15 @@ observações sem defeito (tags `<b>` no título perdidas ao salvar, como no ró
 vira quebra de linha na caixa). Clippy limpo nos três alvos. Captura do menu em
 `docs/img/menu-grupo.png`. Não conferido: clique de verdade com o mouse na janela (só testes sem
 janela e a captura); Linux e Windows rodando; sem verificação de mutação nos testes novos.
+
+Revisão final: 68 testes no motor (novos: título que cede lugar e título por cima das setas,
+fundo opaco mesmo com `fill:none`, traçado igual ao de sem títulos em grupo largo e aninhado, id
+repetido, última definição, `linkStyle` em sete edições, setas gêmeas, lista `1, 2`, número fora do
+intervalo). Duas passadas no delta das correções: a primeira achou a renumeração errada com setas
+gêmeas e a lista com espaços (trocado o casamento por chave por um alinhamento que preserva a ordem,
+e o `remove_edge` passa o mapa exato); a segunda achou a remoção da segunda de duas gêmeas e o número
+fora do intervalo, ambos corrigidos com teste. Parei aí, com os casos provados cobertos por teste.
+Não conferido: o título por cima das setas no tema escuro do app e no visual à mão olhando a tela;
+a escolha do lugar do título usa as rotas antes do ajuste fino das pontas (pode haver cruzamento
+de poucos pixels, não reproduzido). Verificação de mutação: os testes de id repetido, última definição e
+`linkStyle` falham com as correções desligadas, e o do título falhava antes da troca.
