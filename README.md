@@ -22,12 +22,18 @@ continua sendo Mermaid puro, que abre em qualquer lugar.
   um nó já ligado e apagar; sobre uma seta, rótulo, linha, ponta, inverter o sentido e apagar; no
   espaço vazio, criar um nó no ponto clicado, organizar, ajustar à janela e trocar a direção.
   F2 ou Enter abrem o rótulo do selecionado, e Delete apaga.
+- **Grupos (`subgraph`)**: clique no título para selecionar; o botão direito dentro da moldura
+  abre o menu do grupo (renomear, cor, contorno, novo nó dentro dele, desagrupar, apagar com o
+  conteúdo) e o painel de estilo vale para ele. No menu de um nó, "Mover para o grupo" põe o nó
+  num grupo, tira dos grupos ou cria um grupo novo.
 - **Texto e desenho ligados**: selecionar um nó mostra a linha dele; pôr o cursor numa linha
   seleciona o nó.
 - **Tema escuro**, inclusive no desenho. Os arquivos exportados continuam claros.
 - **Exporta** SVG, PNG e PDF, e lê os blocos ` ```mermaid ` de arquivos Markdown.
 
 ![Menu de botão direito sobre um nó](docs/img/menu-contexto.png)
+
+![Menu de botão direito sobre um grupo](docs/img/menu-grupo.png)
 
 ![Editor no tema escuro](docs/img/editor-escuro.png)
 

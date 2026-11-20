@@ -1,6 +1,6 @@
 # FEAT: grupos (`subgraph`) no canvas
 
-Estado: fase A (motor) implementada e revisada, aguardando o "pode commitar"; fase B (app) por fazer (0.8.0)
+Estado: fases A e B implementadas na branch `feat/grupos`; fase B aguardando o "pode commitar" (0.8.0)
 
 ## Problema
 
@@ -229,23 +229,23 @@ memória de economia de créditos).
 
 ### Fase B — app
 
-- [ ] B.1 `Sel::Group(String)`: validação depois de cada mudança do texto, realce do contorno,
+- [x] B.1 `Sel::Group(String)`: validação depois de cada mudança do texto, realce do contorno,
       linha realçada no texto, cursor na linha `subgraph` seleciona (regra 1).
-- [ ] B.2 Clique sem arraste na faixa do título seleciona; o arraste da 0.4.0 segue igual.
-- [ ] B.3 Menu: `MenuTarget::Group(String)` (grupo mais interno sob o ponteiro, regra 2),
+- [x] B.2 Clique sem arraste na faixa do título seleciona; o arraste da 0.4.0 segue igual.
+- [x] B.3 Menu: `MenuTarget::Group(String)` (grupo mais interno sob o ponteiro, regra 2),
       `MenuAction::{Ungroup, MoveTo(Option<String>), NewGroup}`; itens do grupo e "Mover para o
       grupo ▸" no menu do nó; "Novo nó aqui" no grupo chama `move_to_group` depois do
       `add_node_at` (regra 6).
-- [ ] B.4 Painel de estilo do grupo: Título, Cor, Contorno, Apagar (reaproveita `swatch` e os
+- [x] B.4 Painel de estilo do grupo: Título, Cor, Contorno, Apagar (reaproveita `swatch` e os
       métodos `set_node_colour`/`set_node_dashed`, que passam a receber o id de grupo também).
-- [ ] B.5 Teclado: F2 e Enter abrem o título; Delete apaga com o conteúdo.
-- [ ] B.6 Textos em português no `i18n.rs` (Mover para o grupo, Novo grupo, Fora dos grupos,
+- [x] B.5 Teclado: F2 e Enter abrem o título; Delete apaga com o conteúdo.
+- [x] B.6 Textos em português no `i18n.rs` (Mover para o grupo, Novo grupo, Fora dos grupos,
       Desagrupar, Apagar com o conteúdo, Título, e a mensagem de setas que saíram).
-- [ ] B.7 Testes sem janela no `mod gestures` para os cenários do aceite; o teste da regra 10 da
+- [x] B.7 Testes sem janela no `mod gestures` para os cenários do aceite; o teste da regra 10 da
       0.7.0 passa a esperar o nó dentro do grupo.
-- [ ] B.8 README (seção de edição visual) e captura com o menu do grupo aberto
+- [x] B.8 README (seção de edição visual) e captura com o menu do grupo aberto
       (`MERMAIDCRAFT_SHOT_MENU` passa a aceitar id de grupo).
-- [ ] B.9 `cargo test`, clippy nos três alvos, uma revisão da branch inteira e uma do delta da
+- [x] B.9 `cargo test`, clippy nos três alvos, uma revisão da branch inteira e uma do delta da
       correção, notas, diff e commit sugerido.
 
 ### Riscos
@@ -288,6 +288,21 @@ Fase A:
 - **Limite conhecido.** Num nó citado em mais de um grupo, a definição (`X[Rótulo]`) que estava só
   na citação de um grupo apagado com "Apagar grupo" pode se perder; o nó continua no outro grupo.
 
+Fase B:
+
+- **`MoveTo` por índice.** `MenuAction` é `Copy`, então `MoveTo(Option<usize>)` guarda o número do
+  grupo em `flow.subgraphs`, não o id. É seguro porque o menu fecha quando o texto muda.
+- **Cor do grupo.** A paleta grava a tonalidade `pale` no `fill` do grupo (a do nó é `light`).
+- **Contorno.** Sem `style`, o grupo aparece "Tracejado" fora do visual clássico. Sólido grava
+  `stroke-dasharray:0`; `0` e `none` só valem como sólido para grupo (num nó escrito à mão, `0`
+  continua sendo traço).
+- **Título vazio.** A caixa do título vazia não muda nada e a barra de estado diz "O grupo precisa
+  de um título".
+- **Duplo clique no título** abre o título; clicar na faixa do título também seleciona (arrastar
+  seleciona o grupo movido).
+- **Novo nó aqui no grupo** é um passo de desfazer só (nó criado, posto no grupo e deslocado).
+- **Captura.** `MERMAIDCRAFT_SHOT_MENU` aceita também id de grupo.
+
 ## Testes
 
 Fase A: 60 testes no motor (19 novos para grupos: spans, renomear, estilo na moldura, mover, novo
@@ -300,4 +315,13 @@ grupo e classe perdida ao mover), 2 médios (desvio do título entrando em nó; 
 nó de várias setas e ao desagrupar `A --> G1`: só sujeira, nada se perde).
 Não conferido: os testes novos não passaram por verificação de mutação (código revertido para ver
 o teste falhar), salvo o do título, que falhava antes do desvio; o desenho do `fluxo-longo.mmd`
-foi visto uma vez a olho; nada da fase B (app) existe ainda.
+foi visto uma vez a olho.
+
+Fase B: 42 testes no app (10 novos em `mod gestures`: título seleciona e arrasta, menu do grupo,
+renomear, cor e contorno, mover/novo grupo, novo nó dentro, desagrupar com a mensagem, apagar e
+⌘Z, texto com erro, título vazio). Revisão independente (uma passada): 3 achados baixos corrigidos
+(prefixo `sub:` tirado em dobro, `0` como sólido também em nó, recusa calada do título vazio) e 2
+observações sem defeito (tags `<b>` no título perdidas ao salvar, como no rótulo de nó; `<br/>`
+vira quebra de linha na caixa). Clippy limpo nos três alvos. Captura do menu em
+`docs/img/menu-grupo.png`. Não conferido: clique de verdade com o mouse na janela (só testes sem
+janela e a captura); Linux e Windows rodando; sem verificação de mutação nos testes novos.
