@@ -599,12 +599,12 @@ fn text_place_names_the_node_or_edge_under_it() {
     assert_eq!(edit::item_at(&f, src.find("  A -->").unwrap(), 2), Some(edit::TextItem::Node("A".into())));
     // `end` names nothing.
     assert_eq!(at("end", 0, 6), None);
-    // A group id is not a node; a link drawn as two edges names neither.
+    // A group id names the group; a link drawn as two edges names neither.
     let src2 = "flowchart TD\n  subgraph G\n    X\n  end\n  A --> G\n  X & Y --> Z\n  style G fill:#fff\n";
     let f2 = flow(src2);
     let at2 = |needle: &str, off: usize, line: usize| edit::item_at(&f2, src2.find(needle).unwrap() + off, line);
-    assert_eq!(at2("G\n  X &", 0, 5), None);
-    assert_eq!(at2("style G", 6, 7), None);
+    assert_eq!(at2("G\n  X &", 0, 5), Some(edit::TextItem::Group("G".into())));
+    assert_eq!(at2("style G", 6, 7), Some(edit::TextItem::Group("G".into())));
     assert_eq!(at2("--> Z", 1, 6), None);
     assert_eq!(at2("Y -->", 0, 6), Some(edit::TextItem::Node("Y".into())));
 }
@@ -679,4 +679,483 @@ fn edit_reverse_edge_finds_the_moved_edge_and_keeps_crlf() {
     // A chain split in a CRLF file keeps CRLF.
     let (s, _) = edit::reverse_edge("flowchart TD\r\n  A --> B --> C\r\n", 1).unwrap();
     assert!(!s.replace("\r\n", "").contains('\n'), "{s:?}");
+}
+
+// ---- Grupos (subgraph) ----
+
+/// `node -> group id` for every node of the text (None when the node is loose).
+fn group_of(src: &str, node: &str) -> Option<String> {
+    let f = flow(src);
+    let n = &f.nodes[f.node_index(node).unwrap()];
+    n.parent.map(|p| f.subgraphs[p].id.clone())
+}
+
+const GROUPED: &str = "flowchart TD\n  subgraph G1[\"Entrada\"]\n    A[Um] --> B[Dois]\n  end\n  C[Tres] --> G1\n  D[Quatro]\n";
+
+#[test]
+fn group_header_and_end_spans() {
+    let src = "flowchart TD\n  subgraph Fora[\"Fora\"]\n    subgraph Dentro\n      A\n    end\n    B\n  end\n";
+    let f = flow(src);
+    let text = |s: Span| &src[s.start..s.end];
+    assert_eq!(text(f.subgraphs[0].header), "subgraph Fora[\"Fora\"]");
+    assert_eq!(text(f.subgraphs[1].header), "subgraph Dentro");
+    assert_eq!(f.subgraphs[1].end.map(|s| s.start), src.find("    end\n").map(|i| i + 4));
+    assert_eq!(f.subgraphs[0].end.map(|s| s.start), src.rfind("end"));
+}
+
+#[test]
+fn edit_rename_group_keeps_the_id() {
+    let out = edit::rename_group(GROUPED, "G1", "Chegada").unwrap();
+    assert!(out.contains("subgraph G1[\"Chegada\"]"), "{out}");
+    assert!(out.contains("C[Tres] --> G1"));
+    assert_eq!(flow(&out).subgraphs[0].title, "Chegada");
+    // A header without an id of its own gets the id the parser derived.
+    let out = edit::rename_group("flowchart TD\n  subgraph Entrada\n    A\n  end\n  X --> Entrada\n", "Entrada", "Chegada").unwrap();
+    assert!(out.contains("subgraph Entrada[\"Chegada\"]"), "{out}");
+    let f = flow(&out);
+    assert_eq!(f.subgraphs[0].id, "Entrada");
+    assert_eq!(f.edges.len(), 1);
+    // Special characters in the title do not break the line.
+    let out = edit::rename_group(GROUPED, "G1", "A \"b\" [c]; d").unwrap();
+    assert_eq!(flow(&out).subgraphs[0].title, "A \"b\" [c]; d");
+    assert!(edit::rename_group(GROUPED, "G1", "  ").is_err());
+    assert!(edit::rename_group(GROUPED, "nope", "x").is_err());
+}
+
+#[test]
+fn edit_group_edits_refuse_a_text_with_errors() {
+    let broken = "flowchart TD\n  subgraph G1[\"Entrada\"]\n    A --> B\n";
+    assert!(edit::rename_group(broken, "G1", "x").is_err());
+    assert!(edit::move_to_group(broken, "A", None).is_err());
+    assert!(edit::ungroup(broken, "G1").is_err());
+    assert!(edit::remove_group(broken, "G1").is_err());
+}
+
+#[test]
+fn edit_move_a_loose_node_into_a_group() {
+    let out = edit::move_to_group(GROUPED, "D", Some("G1")).unwrap();
+    assert_eq!(group_of(&out, "D").as_deref(), Some("G1"), "{out}");
+    assert_eq!(flow(&out).nodes[flow(&out).node_index("D").unwrap()].label, "Quatro");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    // Already there: nothing changes.
+    assert_eq!(edit::move_to_group(&out, "D", Some("G1")).unwrap(), out);
+    assert_eq!(edit::move_to_group(GROUPED, "D", None).unwrap(), GROUPED);
+}
+
+#[test]
+fn edit_move_a_node_out_of_a_chain_keeps_the_others_and_the_link() {
+    let out = edit::move_to_group(GROUPED, "B", None).unwrap();
+    assert_eq!(group_of(&out, "B"), None, "{out}");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    let f = flow(&out);
+    assert_eq!(f.nodes[f.node_index("B").unwrap()].label, "Dois");
+    assert!(f.edges.iter().any(|e| e.from == "A" && e.to == "B"), "{out}");
+    assert!(f.edges.iter().any(|e| e.from == "C" && e.to == "G1"));
+    assert_eq!(f.edges.len(), 2);
+}
+
+#[test]
+fn edit_move_between_groups_and_nested() {
+    let src = "flowchart TD\n  subgraph G1[\"Um\"]\n    A[a] --> B[b]\n    subgraph G2[\"Dois\"]\n      C\n    end\n  end\n  B -->|x| D\n";
+    let out = edit::move_to_group(src, "B", Some("G2")).unwrap();
+    assert_eq!(group_of(&out, "B").as_deref(), Some("G2"), "{out}");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    assert_eq!(group_of(&out, "C").as_deref(), Some("G2"));
+    let f = flow(&out);
+    assert_eq!(f.nodes[f.node_index("B").unwrap()].label, "b");
+    let labelled = f.edges.iter().find(|e| e.from == "B" && e.to == "D").unwrap();
+    assert_eq!(labelled.label.as_deref(), Some("x"));
+    assert!(f.edges.iter().any(|e| e.from == "A" && e.to == "B"), "{out}");
+    // Out of everything, and the loose line keeps its link.
+    let out2 = edit::move_to_group(&out, "B", None).unwrap();
+    assert_eq!(group_of(&out2, "B"), None, "{out2}");
+    assert_eq!(flow(&out2).edges.len(), 2);
+}
+
+#[test]
+fn edit_move_keeps_style_and_shared_lines() {
+    let src = "flowchart TD\n  subgraph G1[\"Um\"]\n    A & B --> C\n  end\n  style B fill:#f9f\n  class A,B k\n  classDef k stroke:#333\n";
+    let out = edit::move_to_group(src, "B", None).unwrap();
+    assert_eq!(group_of(&out, "B"), None, "{out}");
+    let f = flow(&out);
+    assert_eq!(f.edges.len(), 2);
+    assert!(f.edges.iter().any(|e| e.from == "A" && e.to == "C"));
+    assert!(f.edges.iter().any(|e| e.from == "B" && e.to == "C"));
+    assert_eq!(f.node_styles.get("B").and_then(|m| m.get("fill")).map(String::as_str), Some("#f9f"));
+    assert_eq!(f.nodes[f.node_index("B").unwrap()].classes, vec!["k".to_string()]);
+}
+
+#[test]
+fn edit_new_group_wraps_a_node() {
+    let (out, id) = edit::new_group(GROUPED, "D", "Grupo").unwrap();
+    assert_eq!(id, "G2", "{out}");
+    assert_eq!(group_of(&out, "D").as_deref(), Some("G2"));
+    assert_eq!(flow(&out).subgraphs[1].title, "Grupo");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    // A node that was in a group leaves it.
+    let (out, id) = edit::new_group(GROUPED, "B", "Novo").unwrap();
+    assert_eq!(group_of(&out, "B").as_deref(), Some(id.as_str()), "{out}");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    assert!(flow(&out).edges.iter().any(|e| e.from == "A" && e.to == "B"));
+}
+
+#[test]
+fn edit_ungroup_keeps_the_content_and_drops_what_named_the_group() {
+    let src = "flowchart TD\n  subgraph G1[\"Entrada\"]\n    direction LR\n    A[Um] --> B[Dois]\n  end\n  C[Tres] --> G1\n  D --> E\n  style G1 fill:#fee\n  %% mermaidcraft:layout sub:G1=40,0 A=3,4\n";
+    let (out, arrows) = edit::ungroup(src, "G1").unwrap();
+    assert_eq!(arrows, 1);
+    let f = flow(&out);
+    assert!(f.subgraphs.is_empty(), "{out}");
+    assert!(!out.contains("subgraph") && !out.contains("end") && !out.contains("direction") && !out.contains("style G1"), "{out}");
+    assert_eq!(f.nodes.len(), 5, "G1 must not become a node: {out}");
+    assert!(f.edges.iter().any(|e| e.from == "A" && e.to == "B"));
+    assert_eq!(f.edges.len(), 2);
+    assert!(!f.offsets.contains_key("sub:G1"));
+    assert_eq!(f.offsets.get("A"), Some(&(3.0, 4.0)));
+}
+
+#[test]
+fn edit_ungroup_moves_a_nested_group_up() {
+    let src = "flowchart TD\n  subgraph G1\n    subgraph G2\n      A\n    end\n    B\n  end\n";
+    let (out, arrows) = edit::ungroup(src, "G1").unwrap();
+    assert_eq!(arrows, 0);
+    let f = flow(&out);
+    assert_eq!(f.subgraphs.len(), 1);
+    assert_eq!(f.subgraphs[0].id, "G2");
+    assert_eq!(f.subgraphs[0].parent, None);
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G2"));
+    assert_eq!(group_of(&out, "B"), None);
+}
+
+#[test]
+fn edit_remove_group_takes_the_content_with_it() {
+    let src = "flowchart TD\n  subgraph G1[\"Entrada\"]\n    A --> B\n    subgraph G2\n      X\n    end\n  end\n  C --> A\n  C --> D\n  style G1 fill:#fee\n  %% mermaidcraft:layout sub:G1=40,0 sub:G2=1,1 D=3,4\n";
+    let out = edit::remove_group(src, "G1").unwrap();
+    let f = flow(&out);
+    assert!(f.subgraphs.is_empty(), "{out}");
+    let ids: Vec<&str> = f.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["C", "D"], "{out}");
+    assert_eq!(f.edges.len(), 1);
+    assert!(!out.contains("style G1") && !out.contains("end") && !out.contains("sub:"), "{out}");
+    assert_eq!(f.offsets.get("D"), Some(&(3.0, 4.0)));
+}
+
+#[test]
+fn edit_group_edits_keep_crlf() {
+    let src = GROUPED.replace('\n', "\r\n");
+    for out in [edit::move_to_group(&src, "D", Some("G1")).unwrap(), edit::move_to_group(&src, "B", None).unwrap(), edit::new_group(&src, "D", "Novo").unwrap().0, edit::ungroup(&src, "G1").unwrap().0] {
+        assert!(!out.replace("\r\n", "").contains('\n'), "a bare LF got in: {out:?}");
+    }
+}
+
+#[test]
+fn item_at_finds_a_group() {
+    let f = flow(GROUPED);
+    let header = GROUPED.find("subgraph").unwrap() + 3;
+    assert_eq!(edit::item_at(&f, header, 2), Some(edit::TextItem::Group("G1".into())));
+    let arrow_target = GROUPED.find("--> G1").unwrap() + 5;
+    assert_eq!(edit::item_at(&f, arrow_target, 5), Some(edit::TextItem::Group("G1".into())));
+    // A line of the group header names the group even with the cursor away from it.
+    assert_eq!(edit::item_at(&f, header + 200, 2), Some(edit::TextItem::Group("G1".into())));
+    // The nodes inside still win.
+    let a = GROUPED.find("A[Um]").unwrap();
+    assert_eq!(edit::item_at(&f, a, 3), Some(edit::TextItem::Node("A".into())));
+}
+
+#[test]
+fn edit_group_moves_leave_tidy_text() {
+    // Into a group: the loose line of the node is not left behind as a duplicate.
+    let out = edit::move_to_group(GROUPED, "D", Some("G1")).unwrap();
+    assert_eq!(out, "flowchart TD\n  subgraph G1[\"Entrada\"]\n    A[Um] --> B[Dois]\n    D[Quatro]\n  end\n  C[Tres] --> G1\n", "{out}");
+    // Out of a group: the definition first, then the link.
+    let out = edit::move_to_group(GROUPED, "B", None).unwrap();
+    assert_eq!(out, "flowchart TD\n  subgraph G1[\"Entrada\"]\n    A[Um]\n  end\n  C[Tres] --> G1\n  D[Quatro]\n  B[Dois]\n  A --> B\n", "{out}");
+    // Ungroup: the content goes one level to the left.
+    let (out, _) = edit::ungroup(GROUPED, "G1").unwrap();
+    assert_eq!(out, "flowchart TD\n  A[Um] --> B[Dois]\n  C[Tres]\n  D[Quatro]\n", "{out}");
+}
+
+fn frame_prim(s: &scene::Scene, c: usize) -> &scene::Prim {
+    s.prims.iter().find(|p| p.tag == scene::Tag::Cluster(c) && matches!(p.shape, scene::PrimShape::Rect { .. })).unwrap()
+}
+
+#[test]
+fn a_style_line_of_a_group_colours_its_frame() {
+    let plain = "flowchart TD\n  subgraph G1[\"Um\"]\n    A\n  end\n";
+    let (s0, _) = render_source_with(plain, &RenderOptions::clean()).unwrap();
+    let base = frame_prim(&s0, 0).clone();
+    let styled = format!("{plain}  style G1 fill:#ff0000,stroke:#00ff00,stroke-dasharray:0,color:#0000ff\n");
+    let (s, _) = render_source_with(&styled, &RenderOptions::clean()).unwrap();
+    let p = frame_prim(&s, 0);
+    assert_eq!(p.fill, scene::parse_color("#ff0000"));
+    assert_eq!(p.stroke, scene::parse_color("#00ff00"));
+    assert_eq!(p.dash, None);
+    assert_ne!(base.fill, p.fill);
+    // The title takes `color`.
+    let title = s.prims.iter().find(|p| p.tag == scene::Tag::Cluster(0) && matches!(p.shape, scene::PrimShape::Text { .. })).unwrap();
+    assert_eq!(title.fill, scene::parse_color("#0000ff"));
+    // A dash pattern is used as written, and a group without `style` is unchanged.
+    let dashed = format!("{plain}  style G1 stroke-dasharray:3 4\n");
+    let (s, _) = render_source_with(&dashed, &RenderOptions::clean()).unwrap();
+    assert_eq!(frame_prim(&s, 0).dash, Some((3.0, 4.0)));
+    let (s, _) = render_source_with(plain, &RenderOptions::clean()).unwrap();
+    assert_eq!(frame_prim(&s, 0), &base);
+}
+
+#[test]
+fn edit_set_node_style_takes_a_group_id() {
+    let mut m = StyleMap::new();
+    m.insert("fill".into(), "#fee".into());
+    let out = edit::set_node_style(GROUPED, "G1", &m).unwrap();
+    assert_eq!(flow(&out).node_styles.get("G1").and_then(|s| s.get("fill")).map(String::as_str), Some("#fee"), "{out}");
+    assert_eq!(flow(&out).nodes.len(), 4, "the group must not become a node: {out}");
+    let back = edit::set_node_style(&out, "G1", &StyleMap::new()).unwrap();
+    assert_eq!(back, GROUPED);
+}
+
+/// Rectangle of the title of group `c`, from the text the scene drew for it.
+fn title_rect(s: &scene::Scene, title: &str, c: usize, font: look::Font) -> scene::Rect {
+    let t = s.prims.iter().find(|p| p.tag == scene::Tag::Cluster(c) && matches!(p.shape, scene::PrimShape::Text { .. })).unwrap();
+    let scene::PrimShape::Text { x, y, anchor, .. } = &t.shape else { panic!("not text") };
+    let (w, h) = text::label_size(title, 14.0, true, font);
+    let left = if matches!(anchor, scene::Anchor::Middle) { x - w / 2.0 } else { *x };
+    scene::Rect { x: left, y: y - h / 2.0, w, h }
+}
+
+/// Is the title of group `c` drawn over edge `ei`, on a patch of its own (the frame had no free
+/// place for it)?
+fn over_the_arrows(s: &scene::Scene, c: usize, ei: usize) -> bool {
+    let patch = s.prims.iter().position(|p| is_patch(p, c));
+    let last_edge = s.prims.iter().rposition(|p| p.tag == scene::Tag::Edge(ei));
+    matches!((patch, last_edge), (Some(a), Some(b)) if a > b)
+}
+
+/// The patch under a title drawn over the arrows: a filled rectangle of the group with no outline
+/// (the frame itself has one, in every look).
+fn is_patch(p: &scene::Prim, c: usize) -> bool {
+    p.tag == scene::Tag::Cluster(c) && p.stroke.is_none() && matches!(p.shape, scene::PrimShape::Rect { .. })
+}
+
+/// Titles that sit over the arrows, on a patch.
+fn titles_over(src: &str, opts: &RenderOptions) -> usize {
+    let f = flow(src);
+    let (s, _) = render_source_with(src, opts).unwrap();
+    (0..f.subgraphs.len()).filter(|c| s.prims.iter().any(|p| is_patch(p, *c))).count()
+}
+
+fn titles_crossed(src: &str, opts: &RenderOptions) -> Vec<String> {
+    let f = flow(src);
+    let (s, _) = render_source_with(src, opts).unwrap();
+    let mut hits = Vec::new();
+    for (c, sg) in f.subgraphs.iter().enumerate().filter(|(_, sg)| !sg.title.is_empty()) {
+        let r = title_rect(&s, &sg.title, c, opts.font);
+        for (ei, e) in f.edges.iter().enumerate() {
+            // An edge that ends on the frame itself is not an arrow through its title.
+            if f.subgraph_index(&e.from).is_some() || f.subgraph_index(&e.to).is_some() {
+                continue;
+            }
+            if s.edge_paths[ei].windows(2).any(|w| geom::segment_hits_rect(w[0], w[1], &r)) && !over_the_arrows(&s, c, ei) {
+                hits.push(format!("{} --> {} crosses the title of {}", e.from, e.to, sg.id));
+            }
+        }
+    }
+    hits
+}
+
+#[test]
+fn no_arrow_crosses_the_title_of_a_group() {
+    let small = "flowchart TD\n  X --> A\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n";
+    let up = "flowchart TD\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n  A --> X\n";
+    let long = include_str!("fixtures/fluxo-longo.mmd");
+    let wide = "flowchart TD\n  S --> A & B & C & D\n  subgraph G[\"Titulo do grupo largo\"]\n    A\n    B\n    C\n    D\n  end\n";
+    let nested = "flowchart TD\n  X --> A\n  subgraph G1[\"Externo com titulo comprido\"]\n    P --> Q\n    subgraph G2[\"Interno com titulo comprido\"]\n      A --> B\n    end\n  end\n  X --> P\n";
+    for (name, src) in [("small", small), ("up", up), ("fluxo-longo", long), ("nested", nested), ("wide", wide)] {
+        for opts in [RenderOptions::default(), RenderOptions::clean()] {
+            let hits = titles_crossed(src, &opts);
+            assert!(hits.is_empty(), "{name}: {hits:?}");
+        }
+    }
+}
+
+#[test]
+fn group_moves_keep_classes_and_stay_at_the_root() {
+    // `class` inside a group must not pull the node into that group.
+    let out = edit::move_to_group("flowchart TD\n  subgraph G1\n    A\n    class A foo\n  end\n  subgraph G2\n    B\n  end\n", "B", None).unwrap();
+    assert_eq!(group_of(&out, "B"), None, "{out}");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    // A loose node with a `class` line at the end keeps its class when it is wrapped in a group.
+    let src = "flowchart TD\n  A[Lbl]\n  B --> C\n  classDef foo fill:#f00\n  class A foo\n";
+    let (out, _) = edit::new_group(src, "A", "G").unwrap();
+    let f = flow(&out);
+    assert_eq!(f.nodes[f.node_index("A").unwrap()].classes, vec!["foo".to_string()], "{out}");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G1"));
+    // `:::class` on a mention without a shape survives the move.
+    let src = "flowchart TD\n  subgraph G1\n    A:::foo\n  end\n  subgraph G2\n    B\n  end\n  A[Lbl]\n  classDef foo fill:#f00\n";
+    let out = edit::move_to_group(src, "A", Some("G2")).unwrap();
+    let f = flow(&out);
+    assert_eq!(f.nodes[f.node_index("A").unwrap()].classes, vec!["foo".to_string()], "{out}");
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G2"));
+    // A node named in two groups is moved out of both.
+    let out = edit::move_to_group("flowchart TD\n  subgraph G1\n    A\n  end\n  subgraph G2\n    A\n  end\n  subgraph G3\n    B\n  end\n", "A", Some("G2")).unwrap();
+    assert_eq!(group_of(&out, "A").as_deref(), Some("G2"));
+    assert_eq!(out.matches('A').count(), 1, "{out}");
+}
+
+#[test]
+fn a_title_detour_does_not_run_into_a_node_beside_the_title() {
+    let src = "flowchart TD\n  subgraph G1[\"Muito muito muito longo titulo\"]\n    A\n  end\n  X --> A\n  Y --> A\n  A --> Z\n  A --> X\n";
+    let f = flow(src);
+    let (s, _) = render_source_with(src, &RenderOptions::clean()).unwrap();
+    for (ei, e) in f.edges.iter().enumerate() {
+        for (ni, n) in f.nodes.iter().enumerate().filter(|(_, n)| n.id != e.from && n.id != e.to) {
+            let b = &s.node_boxes[ni];
+            let r = scene::Rect { x: b.x + 2.0, y: b.y + 2.0, w: b.w - 4.0, h: b.h - 4.0 };
+            assert!(!s.edge_paths[ei].windows(2).any(|w| geom::segment_hits_rect(w[0], w[1], &r)), "{} --> {} runs through {}", e.from, e.to, n.id);
+        }
+    }
+}
+
+#[test]
+fn keeping_arrows_off_a_title_does_not_bend_them() {
+    // The title moves out of the way; the arrows into the group stay as the layout drew them.
+    let wide = "flowchart TD\n  S --> A & B & C & D\n  subgraph G[\"Titulo do grupo largo\"]\n    A\n    B\n    C\n    D\n  end\n";
+    let nested = "flowchart TD\n  X --> A\n  subgraph G1[\"Externo com titulo comprido\"]\n    P --> Q\n    subgraph G2[\"Interno com titulo comprido\"]\n      A --> B\n    end\n  end\n  X --> P\n";
+    for src in [wide, nested] {
+        for opts in [RenderOptions::default(), RenderOptions::clean()] {
+            let (s, _) = render_source_with(src, &opts).unwrap();
+            let plain = src.replace("[\"Titulo do grupo largo\"]", "").replace("[\"Externo com titulo comprido\"]", "").replace("[\"Interno com titulo comprido\"]", "");
+            let (p, _) = render_source_with(&plain, &opts).unwrap();
+            let len = |path: &[(f32, f32)]| path.windows(2).map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt()).sum::<f32>();
+            let total = |sc: &scene::Scene| sc.edge_paths.iter().map(|path| len(path)).sum::<f32>();
+            // Titled frames are a little taller; the routes must not grow much beyond that.
+            assert!(total(&s) <= total(&p) * 1.25 + 40.0, "{} vs {} for {src}", total(&s), total(&p));
+        }
+    }
+}
+
+#[test]
+fn a_title_sits_over_the_arrows_only_when_no_place_is_free() {
+    let wide = "flowchart TD\n  S --> A & B & C & D\n  subgraph G[\"Titulo do grupo largo\"]\n    A\n    B\n    C\n    D\n  end\n";
+    let narrow = "flowchart TD\n  X --> A\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n";
+    for opts in [RenderOptions::default(), RenderOptions::clean()] {
+        // Four arrows spread over the top leave no gap as wide as the title: it sits over them.
+        assert!(titles_crossed(wide, &opts).is_empty());
+        assert_eq!(titles_over(narrow, &opts), 1);
+    }
+    // A group no arrow enters keeps its title in the usual place, without a patch.
+    // One arrow down the middle of a wide frame: the title keeps its corner.
+    let roomy = "flowchart TD\n  X --> B\n  subgraph G[\"Curto\"]\n    A --> B\n    C --> B\n    D --> B\n  end\n";
+    assert_eq!(titles_over(roomy, &RenderOptions::clean()), 0);
+    assert!(titles_crossed(roomy, &RenderOptions::clean()).is_empty());
+    let alone = "flowchart TD\n  subgraph G[\"Sozinho\"]\n    A --> B\n  end\n";
+    // (in the default look the usual place is the top-left corner; the classic one centres it)
+    let (s, _) = render_source_with(alone, &RenderOptions::default()).unwrap();
+    let f = flow(alone);
+    let r = title_rect(&s, "Sozinho", 0, RenderOptions::default().font);
+    assert!((r.x - (s.cluster_boxes[0].x + 12.0)).abs() < 0.5, "{} vs {}", r.x, s.cluster_boxes[0].x);
+    assert_eq!(titles_over(alone, &RenderOptions::clean()), 0);
+    assert_eq!(f.subgraphs.len(), 1);
+}
+
+#[test]
+fn edit_groups_with_the_same_id_are_refused() {
+    let src = "flowchart TD\n  subgraph Etapa\n    A[Primeira]\n  end\n  subgraph Etapa\n    B[Segunda]\n  end\n  C[Solto]\n";
+    assert!(edit::remove_group(src, "Etapa").is_err());
+    assert!(edit::ungroup(src, "Etapa").is_err());
+    assert!(edit::rename_group(src, "Etapa", "x").is_err());
+    assert!(edit::move_to_group(src, "C", Some("Etapa")).is_err());
+    let msg = edit::remove_group(src, "Etapa").unwrap_err().to_string();
+    assert!(msg.contains("two groups"), "{msg}");
+}
+
+#[test]
+fn edit_move_keeps_the_label_that_counts() {
+    // The last definition is the one shown.
+    let src = "flowchart TD\n  X[Raiz] --> Y\n  subgraph G1\n    X[Novo]\n  end\n  subgraph G2\n    B\n  end\n";
+    assert_eq!(flow(src).nodes[0].label, "Novo");
+    for dest in [Some("G2"), None] {
+        let out = edit::move_to_group(src, "X", dest).unwrap();
+        let f = flow(&out);
+        assert_eq!(f.nodes[f.node_index("X").unwrap()].label, "Novo", "{dest:?}: {out}");
+        assert_eq!(group_of(&out, "X").as_deref(), dest, "{out}");
+    }
+    let src = "flowchart TD\n  subgraph G1\n    X[Um]\n  end\n  subgraph G2\n    X{Dois}\n  end\n  subgraph G3\n    B\n  end\n";
+    let out = edit::move_to_group(src, "X", Some("G3")).unwrap();
+    let f = flow(&out);
+    let x = &f.nodes[f.node_index("X").unwrap()];
+    assert_eq!((x.label.as_str(), x.shape), ("Dois", NodeShape::Diamond), "{out}");
+}
+
+#[test]
+fn link_styles_follow_their_links() {
+    // Moving X out sends A --> X to the end: its style goes with it.
+    let src = "flowchart TD\n  subgraph G1\n    A --> X\n    B --> C\n  end\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let out = edit::move_to_group(src, "X", None).unwrap();
+    let f = flow(&out);
+    let ax = f.edges.iter().position(|e| e.from == "A" && e.to == "X").unwrap();
+    let bc = f.edges.iter().position(|e| e.from == "B" && e.to == "C").unwrap();
+    assert!(out.contains(&format!("linkStyle {ax} stroke:red")) && out.contains(&format!("linkStyle {bc} stroke:blue")), "{out}");
+    // A removed link takes its number out of the list, and a list left empty goes.
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  C --> D\n  linkStyle 0,2 stroke:red\n  linkStyle 1 stroke:blue\n  linkStyle default stroke:#999\n";
+    let out = edit::remove_edge(src, 1).unwrap();
+    assert!(out.contains("linkStyle 0,1 stroke:red") && !out.contains("stroke:blue") && out.contains("linkStyle default stroke:#999"), "{out}");
+    let out = edit::remove_node(src, "A").unwrap();
+    assert!(out.contains("linkStyle 1 stroke:red") && out.contains("linkStyle 0 stroke:blue"), "{out}");
+    // Reversing a link keeps its number on it.
+    let src = "flowchart TD\n  A --> B --> C\n  D --> E\n  linkStyle 0 stroke:red\n  linkStyle 2 stroke:blue\n";
+    let (out, n) = edit::reverse_edge(src, 0).unwrap();
+    let f = flow(&out);
+    let de = f.edges.iter().position(|e| e.from == "D").unwrap();
+    assert!(out.contains(&format!("linkStyle {n} stroke:red")) && out.contains(&format!("linkStyle {de} stroke:blue")), "{out}");
+    // Ungroup and removing a group drop the styles of the links that went.
+    let src = "flowchart TD\n  subgraph G1\n    A --> B\n  end\n  C --> G1\n  C --> D\n  linkStyle 1 stroke:red\n  linkStyle 2 stroke:blue\n";
+    let (out, _) = edit::ungroup(src, "G1").unwrap();
+    assert!(!out.contains("stroke:red") && out.contains("linkStyle 1 stroke:blue"), "{out}");
+    let out = edit::remove_group(src, "G1").unwrap();
+    assert!(!out.contains("stroke:red") && out.contains("linkStyle 0 stroke:blue"), "{out}");
+}
+
+#[test]
+fn link_styles_follow_twin_links_and_spaced_lists() {
+    // Changing the label of one of two twin links moves no link: the numbers stay.
+    let src = "flowchart TD\n  A -->|x| B\n  A -->|x| B\n  A --> B\n  linkStyle 0 stroke:red\n  linkStyle 2 stroke:blue\n";
+    let out = edit::set_edge(src, 0, Some(None), None).unwrap();
+    assert!(out.contains("linkStyle 0 stroke:red") && out.contains("linkStyle 2 stroke:blue"), "{out}");
+    // Reversing in place keeps the number, even when the result is a twin of another link.
+    let src = "flowchart TD\n  A --> B\n  B --> A\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let (out, n) = edit::reverse_edge(src, 0).unwrap();
+    assert_eq!(n, 0);
+    assert!(out.contains("linkStyle 0 stroke:red") && out.contains("linkStyle 1 stroke:blue"), "{out}");
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  C --> B\n  linkStyle 2 stroke:red\n";
+    let (out, _) = edit::reverse_edge(src, 1).unwrap();
+    assert!(out.contains("linkStyle 2 stroke:red"), "{out}");
+    // Removing the first of two twins drops its style and moves the other's.
+    let src = "flowchart TD\n  A --> B\n  A --> B\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(!out.contains("stroke:red") && out.contains("linkStyle 0 stroke:blue"), "{out}");
+    // A list written with spaces is renumbered too.
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  C --> D\n  linkStyle 1, 2 stroke:red\n";
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(out.contains("linkStyle 0,1 stroke:red"), "{out}");
+}
+
+#[test]
+fn a_title_over_a_see_through_frame_still_hides_the_arrows() {
+    let src = "flowchart TD\n  X --> A\n  subgraph G[\"Titulo comprido do grupo inteiro\"]\n    A --> B\n  end\n  style G fill:none\n";
+    let (s, _) = render_source_with(src, &RenderOptions::clean()).unwrap();
+    let patch = s.prims.iter().find(|p| is_patch(p, 0)).expect("patch");
+    assert_eq!(patch.fill.map(|c| c[3]), Some(255));
+}
+
+#[test]
+fn removing_either_twin_keeps_the_other_ones_style() {
+    let src = "flowchart TD\n  A --> B\n  A --> B\n  linkStyle 0 stroke:red\n  linkStyle 1 stroke:blue\n";
+    let out = edit::remove_edge(src, 1).unwrap();
+    assert!(out.contains("linkStyle 0 stroke:red") && !out.contains("stroke:blue"), "{out}");
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(out.contains("linkStyle 0 stroke:blue") && !out.contains("stroke:red"), "{out}");
+    // A number that named no link is left as written.
+    let src = "flowchart TD\n  A --> B\n  B --> C\n  linkStyle 9 stroke:red\n";
+    let out = edit::remove_edge(src, 0).unwrap();
+    assert!(out.contains("linkStyle 9 stroke:red"), "{out}");
 }

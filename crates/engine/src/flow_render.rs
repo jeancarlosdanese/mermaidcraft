@@ -294,6 +294,44 @@ fn cluster_colors(mode: ColorMode, s: usize) -> (Color, Color, bool, Color) {
     }
 }
 
+/// The frame of a group with its own `style <id> ...` line applied: `fill`, `stroke`,
+/// `stroke-width`, `stroke-dasharray` (`0` or `none` draws it solid) and `color` (the title).
+struct ClusterLook {
+    fill: Color,
+    stroke: Color,
+    width: f32,
+    dash: Option<(f32, f32)>,
+    title: Color,
+}
+
+fn cluster_look(fc: &Flowchart, id: &str, base: (Color, Color, bool, Color)) -> ClusterLook {
+    let (fill, stroke, dashed, title) = base;
+    let mut l = ClusterLook { fill, stroke, width: 1.6, dash: if dashed { Some((7.0, 5.0)) } else { None }, title };
+    for (k, v) in fc.node_styles.get(id).into_iter().flatten() {
+        match k.as_str() {
+            "fill" => l.fill = parse_color(v).unwrap_or(l.fill),
+            "stroke" => l.stroke = parse_color(v).unwrap_or(l.stroke),
+            "color" => l.title = parse_color(v).unwrap_or(l.title),
+            "stroke-width" => {
+                if let Ok(w) = v.trim_end_matches("px").trim().parse::<f32>() {
+                    l.width = w.clamp(0.0, 20.0);
+                }
+            }
+            "stroke-dasharray" => {
+                let nums: Vec<f32> = v.split([' ', ',']).filter_map(|x| x.trim().parse::<f32>().ok()).collect();
+                l.dash = match nums.as_slice() {
+                    [] if v.trim() == "none" => None,
+                    [a, b, ..] if *a > 0.0 => Some((a.clamp(0.5, 50.0), b.clamp(0.5, 50.0))),
+                    [a] if *a > 0.0 => Some((a.clamp(0.5, 50.0), a.clamp(0.5, 50.0))),
+                    [..] => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    l
+}
+
 /// Is `p` within `tol` of the polyline?
 fn near_path(path: &[P], p: P, tol: f32) -> bool {
     path.windows(2).any(|w| match w {
@@ -717,24 +755,25 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
             Rect { x: c.0 - w / 2.0, y: c.1 - h / 2.0, w, h }
         })
         .collect();
-    // Clusters, outermost first.
+    // Clusters, outermost first. Their titles are drawn once the routes are known (below).
+    // Title colour and frame fill of each group.
+    let mut title_colors: Vec<(Color, Color)> = vec![([0, 0, 0, 255], [255, 255, 255, 255]); fc.subgraphs.len()];
     for &s in &by_depth_asc {
         let b = sub_box.get(s).copied().unwrap_or_default();
         let tag = Tag::Cluster(s);
-        let (fill, stroke, dashed, title_col) = cluster_colors(opts.colors, s);
+        let look = match fc.subgraphs.get(s) {
+            Some(sg) => cluster_look(fc, &sg.id, cluster_colors(opts.colors, s)),
+            None => cluster_look(fc, "", cluster_colors(opts.colors, s)),
+        };
+        let title_col = look.title;
         let classic = opts.colors == ColorMode::Classic;
-        scene.push(Prim::new(PrimShape::Rect { x: b.x, y: b.y, w: b.w, h: b.h, r: if classic { 4.0 } else { 10.0 } }).fill(fill).stroke(stroke, 1.6).dash_if(dashed).tag(tag));
-        if let Some(sg) = fc.subgraphs.get(s) {
-            if !sg.title.is_empty() {
-                let cy = b.y + 6.0 + label_size(&sg.title, TITLE_FONT, true, font).1 / 2.0;
-                // The classic look centres the title; the others keep it in the top-left corner,
-                // out of the way of edges that enter the frame from above.
-                if classic {
-                    push_text_lines(&mut scene, b.x + b.w / 2.0, cy, &sg.title, TITLE_FONT, title_col, true, Anchor::Middle, tag);
-                } else {
-                    push_text_lines(&mut scene, b.x + 12.0, cy, &sg.title, TITLE_FONT, title_col, true, Anchor::Start, tag);
-                }
-            }
+        let mut frame = Prim::new(PrimShape::Rect { x: b.x, y: b.y, w: b.w, h: b.h, r: if classic { 4.0 } else { 10.0 } }).fill(look.fill).stroke(look.stroke, look.width).tag(tag);
+        if let Some((on, off)) = look.dash {
+            frame = frame.dash(on, off);
+        }
+        scene.push(frame);
+        if let Some(t) = title_colors.get_mut(s) {
+            *t = (title_col, look.fill);
         }
     }
     // Edges.
@@ -814,6 +853,76 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         if let Some(slot) = routes.get_mut(ei) {
             *slot = Some(pts);
         }
+    }
+
+    // Group titles go where no arrow crosses them: their usual place (the top-left corner, or the
+    // centre in the classic look), else another place along the top of the frame. The routes are
+    // left as they are; with every place crossed the title stays in its usual one.
+    let classic = opts.colors == ColorMode::Classic;
+    let mut over_titles: Vec<Prim> = Vec::new();
+    for &s in &by_depth_asc {
+        let (Some(sg), Some(b)) = (fc.subgraphs.get(s), sub_box.get(s).copied()) else { continue };
+        if sg.title.is_empty() {
+            continue;
+        }
+        let (tw, th) = label_size(&sg.title, TITLE_FONT, true, font);
+        let cy = b.y + 6.0 + th / 2.0;
+        let (left, right, centre) = (b.x + 12.0, b.x + b.w - 12.0 - tw, b.x + b.w / 2.0 - tw / 2.0);
+        let order = if classic { [centre, left, right] } else { [left, right, centre] };
+        let band_at = |x0: f32| Rect { x: x0 - 6.0, y: b.y, w: tw + 12.0, h: 12.0 + th };
+        let crossing = |x0: f32, routes: &[Option<Vec<P>>]| -> Vec<usize> {
+            let band = band_at(x0);
+            fc.edges
+                .iter()
+                .enumerate()
+                .filter(|(ei, e)| {
+                    let ends_on_frame = endpoint(fc, &e.from) == Some(Item::Sub(s)) || endpoint(fc, &e.to) == Some(Item::Sub(s));
+                    e.kind.style != LineStyle::Invisible && !ends_on_frame && routes.get(*ei).and_then(Option::as_ref).is_some_and(|pts| pts.windows(2).any(|w| matches!(w, [p, q] if segment_hits_rect(*p, *q, &band))))
+                })
+                .map(|(ei, _)| ei)
+                .collect()
+        };
+        // Besides the usual places, the title may sit just beside each arrow that enters the band.
+        let mut places: Vec<f32> = order.to_vec();
+        for (ei, e) in fc.edges.iter().enumerate() {
+            let ends_on_frame = endpoint(fc, &e.from) == Some(Item::Sub(s)) || endpoint(fc, &e.to) == Some(Item::Sub(s));
+            let Some(Some(pts)) = routes.get(ei) else { continue };
+            if ends_on_frame {
+                continue;
+            }
+            for w in pts.windows(2) {
+                let [p, q] = w else { continue };
+                for k in 0..=16 {
+                    let f = k as f32 / 16.0;
+                    let (x, y) = (p.0 + (q.0 - p.0) * f, p.1 + (q.1 - p.1) * f);
+                    if y >= b.y && y <= b.y + 12.0 + th && x >= b.x && x <= b.x + b.w {
+                        places.push(x + 10.0);
+                        places.push(x - 10.0 - tw);
+                    }
+                }
+            }
+        }
+        let fits = |x: f32| x >= b.x + 4.0 && x + tw <= b.x + b.w - 4.0;
+        let free = places.iter().copied().find(|x| fits(*x) && crossing(*x, &routes).is_empty());
+        let x0 = free.unwrap_or(order[0]);
+        let (col, fill) = title_colors.get(s).copied().unwrap_or((t.text, [255, 255, 255, 255]));
+        // A see-through frame (`fill:none`) would not hide the arrows: use the paper instead.
+        let fill = if fill[3] < 200 { t.background } else { fill };
+        // No place is free (the frame is about as wide as its title): the title stays in its usual
+        // place and is drawn over the arrows, on a patch of the frame's own fill, after them.
+        let mut target = Scene::default();
+        let over = free.is_none();
+        if over {
+            let band = band_at(x0);
+            target.push(Prim::new(PrimShape::Rect { x: band.x + 2.0, y: cy - th / 2.0 - 2.0, w: band.w - 4.0, h: th + 4.0, r: 4.0 }).fill(fill).tag(Tag::Cluster(s)));
+        }
+        let into = if over { &mut target } else { &mut scene };
+        if x0 == centre {
+            push_text_lines(into, b.x + b.w / 2.0, cy, &sg.title, TITLE_FONT, col, true, Anchor::Middle, Tag::Cluster(s));
+        } else {
+            push_text_lines(into, x0, cy, &sg.title, TITLE_FONT, col, true, Anchor::Start, Tag::Cluster(s));
+        }
+        over_titles.append(&mut target.prims);
     }
 
     // 2. Ports: edges that meet a node on the same side are spread along that side, in the order
@@ -977,6 +1086,10 @@ pub fn render(fc: &Flowchart, opts: &crate::RenderOptions) -> Scene {
         }
     }
     for p in label_prims {
+        scene.push(p);
+    }
+    // Titles that had no free place, over the arrows.
+    for p in over_titles {
         scene.push(p);
     }
     // Nodes on top of the edge ends.

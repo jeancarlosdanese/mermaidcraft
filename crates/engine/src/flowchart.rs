@@ -556,14 +556,19 @@ pub fn parse(lines: &[Line<'_>], first: usize, diags: &mut Vec<Diagnostic>) -> F
                     } else {
                         let (id, title) = parse_subgraph_header(rest);
                         let idx = b.fc.subgraphs.len();
-                        b.fc.subgraphs.push(Subgraph { id, title, parent: b.stack.last().copied(), direction: None, line: line.no });
+                        b.fc.subgraphs.push(Subgraph { id, title, parent: b.stack.last().copied(), direction: None, line: line.no, header: span, end: None });
                         b.stack.push(idx);
                         Some(StmtKind::Keyword { word: "subgraph".into(), ids: Vec::new() })
                     }
                 }
                 "end" if rest.is_empty() => {
-                    if b.stack.pop().is_none() {
-                        b.diags.push(Diagnostic::error(line.no, col_base + 1, "'end' without a matching 'subgraph'"));
+                    match b.stack.pop() {
+                        Some(s) => {
+                            if let Some(sg) = b.fc.subgraphs.get_mut(s) {
+                                sg.end = Some(span);
+                            }
+                        }
+                        None => b.diags.push(Diagnostic::error(line.no, col_base + 1, "'end' without a matching 'subgraph'")),
                     }
                     Some(StmtKind::Keyword { word: "end".into(), ids: Vec::new() })
                 }
